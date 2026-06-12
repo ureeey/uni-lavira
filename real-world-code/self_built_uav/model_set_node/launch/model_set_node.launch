@@ -1,0 +1,35 @@
+<launch>
+  <!-- =========================
+       model_set_node launcher
+       ========================= -->
+
+  <arg name="output" default="screen"/>
+
+  <!-- Publishing rate and speed -->
+  <arg name="rate_hz" default="20.0"/>
+  <arg name="track_speed" default="1.0"/>
+  <arg name="reach_tol" default="0.20"/>
+
+  <!-- Frame ID -->
+  <arg name="vision_frame_id" default="map"/>
+  <arg name="setpoint_frame_id" default="map"/>
+
+  <!-- Enable VINS->PX4 local alignment -->
+  <arg name="enable_alignment" default="true"/>
+
+  <!-- Launch node -->
+  <node pkg="model_set_node"
+        type="model_set_node.py"
+        name="model_set_node"
+        output="$(arg output)">
+
+    <param name="rate_hz" value="$(arg rate_hz)"/>
+    <param name="track_speed" value="$(arg track_speed)"/>
+    <param name="reach_tol" value="$(arg reach_tol)"/>
+
+    <param name="vision_frame_id" value="$(arg vision_frame_id)"/>
+    <param name="setpoint_frame_id" value="$(arg setpoint_frame_id)"/>
+
+    <param name="enable_alignment" value="$(arg enable_alignment)"/>
+  </node>
+</launch>

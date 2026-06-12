@@ -1,0 +1,67 @@
+# Python build / package artifacts
+*.egg-info/
+*.egg
+dist/
+build/
+*.pyc
+*.pyo
+.mypy_cache/
+.pytype/
+.ruff_cache/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Secrets and local config
+.env
+.env.local
+*.env
+!.env.example
+
+# Datasets, checkpoints, runtime output (large; downloaded separately — see README)
+data/checkpoints/
+data/scene_datasets/
+data/grounded_sam/
+data/logs/
+data/datasets/R2R_VLNCE_v1-3_preprocessed/
+data/datasets/objectnav_hm3d_v2/
+data/datasets/hm3d_ovon/
+data/datasets/rxr/
+data/datasets/mp3d/
+data/datasets/RxR/
+# Keep curated subset files: data/datasets/stratified_samples/*.json
+
+logs/
+output/
+results/
+saved_rgb_images/
+*rgb*
+videos/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Compressed dataset shards
+*.json.gz
+
+# Vendored baselines / runtime-installed deps (installed separately — see README)
+baseline/
+GroundingDINO/
+
+# Logs and runtime artifacts from eval scripts
+eval_scripts/*.log
+*.wandb/
+
+# Caches
+.cache/
+.pytest_cache/
+.coverage
+htmlcov/
+*.prof
+__pycache__/

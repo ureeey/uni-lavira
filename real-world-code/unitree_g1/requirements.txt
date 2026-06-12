@@ -1,0 +1,19 @@
+openai>=1.0
+numpy
+scipy
+opencv-python
+Pillow
+requests
+colorama
+pyyaml
+imageio
+torch
+torchvision
+Flask
+Flask-SocketIO
+gevent
+gevent-websocket
+simplejpeg
+faster-whisper
+# ROS deps (rospy, cv_bridge) from the system catkin/ROS install, not pip.
+# Hardware SDKs (install separately): pyorbbecsdk (Orbbec Gemini 336L cameras), unitree_sdk2py (G1 locomotion).

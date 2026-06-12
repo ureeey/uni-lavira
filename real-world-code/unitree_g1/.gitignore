@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Secrets & models (NEVER commit)
+.env
+*.pem
+cert.pem
+key.pem
+models/
+*.pth
+*.pkl
+
+# Runtime outputs
+outputs/
+logs/
+Log/
+ros_logs/
+test_output/
+temp_audio.webm
+20*-*/
+
+# ROS build
+build/
+devel/
+
+# Internal tooling
+.claude/

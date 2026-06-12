@@ -1,0 +1,1 @@
+# LaViRA Cobot Magic tests

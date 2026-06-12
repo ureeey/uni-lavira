@@ -1,0 +1,2 @@
+airsim==1.8.1
+flash-attn==2.5.9.post1

@@ -1,0 +1,18 @@
+<launch>
+  <arg name="instruction_yaml" default="$(find vln_node)/config/instruction.yaml"/>
+  <arg name="navdp_port" default="8888"/>
+
+  <node pkg="vln_node"
+        type="indoor_eval.py"
+        name="indoor_evaluator"
+        output="screen"
+        respawn="false">
+    <param name="instruction_yaml" value="$(arg instruction_yaml)"/>
+    <param name="navdp_port" value="$(arg navdp_port)"/>
+    <param name="loop_hz" value="10.0"/>
+    <env name="OPENAI_API_KEY" value="YOUR_API_KEY"/>
+    <env name="OPENAI_BASE_URL" value="YOUR_API_BASE_URL"/>
+    <env name="OPENAI_API_KEY_SECONDARY" value="YOUR_SECONDARY_API_KEY"/>
+    <env name="OPENAI_BASE_URL_SECONDARY" value="YOUR_SECONDARY_API_BASE_URL"/>
+  </node>
+</launch>

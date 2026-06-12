@@ -1,0 +1,17 @@
+openai>=1.0
+numpy
+opencv-python
+Pillow
+requests
+colorama
+pyyaml
+imageio
+torch
+torchvision
+faster-whisper
+Flask
+Flask-SocketIO
+gevent
+gevent-websocket
+simplejpeg
+# ROS deps (rospy, cv_bridge) come from the system catkin/ROS install, not pip.
