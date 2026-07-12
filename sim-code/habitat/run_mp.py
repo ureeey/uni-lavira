@@ -1,3 +1,20 @@
+import sys
+import types
+import warnings
+
+# Suppress gym's "unmaintained since 2022" stderr notice before any import triggers it.
+# gym/__init__.py does `import gym_notices.notices as notices; print(notice, file=sys.stderr)`
+# which bypasses Python's warnings system. Mocking gym_notices before gym is imported
+# makes the `import gym_notices.notices as notices` line grab our no-op stub.
+_dummy_notices = types.ModuleType('gym_notices')
+_dummy_notices.notices = types.ModuleType('gym_notices.notices')
+_dummy_notices.notices.notices = {}
+sys.modules['gym_notices'] = _dummy_notices
+sys.modules['gym_notices.notices'] = _dummy_notices.notices
+
+# Also suppress noisy third-party FutureWarnings
+warnings.filterwarnings('ignore', message='.*Importing from timm.models.layers is deprecated.*')
+
 import argparse
 import random
 import os

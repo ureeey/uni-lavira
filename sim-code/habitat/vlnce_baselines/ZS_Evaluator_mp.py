@@ -349,7 +349,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                                  getattr(self.config.TASK_CONFIG.TASK.SUCCESS, 'SUCCESS_DISTANCE', 3.0))
 
         if self.gt_data is not None and str(ep_id) in self.gt_data:
-            gt_path = np.array(self.gt_data[str(ep_id)]['locations']).astype(np.float)
+            gt_path = np.array(self.gt_data[str(ep_id)]['locations']).astype(float)
             pred_path = np.array(info['position']['position'])
             distances = np.array(info['position']['distance'])
             gt_length = distances[0]
@@ -418,6 +418,22 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
     def _concat_obs(self, obs: Observations) -> np.ndarray:
         rgb = obs['rgb'].astype(np.uint8)
         depth = obs['depth']
+        # Diagnose black-frame causes per Doubao community analysis:
+        # 1. RGB≈0 + depth≈0 → agent穿过墙壁嵌入mesh内部
+        # 2. RGB≈0 + depth>0 → 纹理/光照未加载或EGL上下文丢失
+        if rgb.mean() < 5:
+            d = depth[:, :, 0] if depth.ndim == 3 else depth
+            depth_mean = float(d.mean()) if d.size > 0 else 0.0
+            ep_id = getattr(self, 'current_episode_id', '?')
+            st = getattr(self, 'current_step', '?')
+            if depth_mean < 0.001:
+                logger.warning(f"[BLACK-FRAME] ep={ep_id} step={st} "
+                               f"RGB mean={rgb.mean():.1f}, depth mean={depth_mean:.4f} "
+                               f"→ 疑似穿墙 (camera inside mesh)")
+            else:
+                logger.warning(f"[BLACK-FRAME] ep={ep_id} step={st} "
+                               f"RGB mean={rgb.mean():.1f}, depth mean={depth_mean:.4f} "
+                               f"→ 疑似纹理未加载/EGL上下文丢失")
         state = np.concatenate((rgb, depth), axis=2).transpose(2, 0, 1)  # (h, w, c)->(c, h, w)
 
         return state

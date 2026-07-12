@@ -34,7 +34,7 @@ class SensorPoseSensor(Sensor):
         return SensorTypes.TACTILE
     
     def _get_observation_space(self, *args: Any, **kwargs: Any):
-        return spaces.Box(low=-100., high=100, shape=(3,), dtype=np.float)
+        return spaces.Box(low=-100., high=100, shape=(3,), dtype=np.float64)
 
     def get_observation(self, observations, *args: Any, episode, **kwargs: Any):
         if not self.episode_start:
@@ -108,7 +108,7 @@ class HeadingSensor(Sensor):
         return SensorTypes.HEADING
 
     def _get_observation_space(self, *args: Any, **kwargs: Any):
-        return spaces.Box(low=-np.pi, high=np.pi, shape=(1,), dtype=np.float)
+        return spaces.Box(low=-np.pi, high=np.pi, shape=(1,), dtype=np.float64)
 
     def _quat_to_xy_heading(self, quat):
         direction_vector = np.array([0, 0, -1])

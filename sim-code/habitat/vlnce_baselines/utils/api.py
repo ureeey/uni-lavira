@@ -7,28 +7,54 @@ import os
 import json
 import numpy as np
 
+
+def _clear_proxy_env():
+    """Temporarily remove proxy env vars that httpx might choke on (e.g. socks://).
+
+    Returns a dict of popped values so they can be restored.
+    Only clears the SOCKS / catch-all proxies; HTTP/HTTPS proxies are left intact
+    because the VA endpoint (aliyun MAAS) may require them.
+    """
+    _proxy_keys = ('ALL_PROXY', 'all_proxy')
+    backup = {}
+    for k in _proxy_keys:
+        if k in os.environ:
+            backup[k] = os.environ.pop(k)
+    return backup
+
+
+def _restore_proxy_env(backup):
+    """Restore proxy env vars cleared by _clear_proxy_env."""
+    os.environ.update(backup)
+
+
 class LaViRA_API:
 
     def __init__(self, la_api_key=None, la_base_url=None, la_model_name="gpt-4-vision-preview",
                  va_model_name=None, va_api_key=None, va_base_url=None):
-        self.la_client = OpenAI(
-            api_key=la_api_key,
-            base_url=la_base_url,
-            timeout=2000
-        )
-        self.la_model_name = la_model_name
-
-        if va_model_name:
-            self.va_client = OpenAI(
-                api_key=va_api_key,
-                base_url=va_base_url,
+        # Clear proxy env vars so httpx doesn't choke on unsupported schemes (e.g. socks://).
+        # The API endpoint already encodes the real routing target via base_url.
+        _proxy_backup = _clear_proxy_env()
+        try:
+            self.la_client = OpenAI(
+                api_key=la_api_key,
+                base_url=la_base_url,
                 timeout=2000
-
             )
-            self.va_model_name = va_model_name
-        else:
-            self.va_client = None
-            self.va_model_name = None
+            self.la_model_name = la_model_name
+
+            if va_model_name:
+                self.va_client = OpenAI(
+                    api_key=va_api_key,
+                    base_url=va_base_url,
+                    timeout=2000
+                )
+                self.va_model_name = va_model_name
+            else:
+                self.va_client = None
+                self.va_model_name = None
+        finally:
+            _restore_proxy_env(_proxy_backup)
 
         self.reset_stats()
 
@@ -126,7 +152,14 @@ class LaViRA_API:
         extra_body = kwargs.pop('extra_body', None) or {}
         extra_body.setdefault('enable_thinking', False)
 
+        # Estimate payload size for debugging.
+        _msg_str = json.dumps(messages, ensure_ascii=False)
+        _payload_kb = len(_msg_str.encode('utf-8')) / 1024
+        logger.info(f"[{stats_key}] Calling {model_name} | messages={len(messages)} "
+                    f"payload={_payload_kb:.0f} KB timeout=120s ...")
+
         try:
+            _call_t = time.time()
             if stats_key == 'Language Action Model':
                 response = client.chat.completions.create(
                     model=model_name,
@@ -148,6 +181,7 @@ class LaViRA_API:
                     extra_body=extra_body,
                     **kwargs
                 )
+            logger.info(f"[{stats_key}] Response received in {time.time() - _call_t:.1f}s")
             logger.info(response)
             # Handle case where response is a string (e.g. from some proxies or raw returns)
             if isinstance(response, str):
@@ -174,7 +208,9 @@ class LaViRA_API:
 
         except Exception as e:
             err_str = str(e)
-            logger.error(f"API Call error with {'secondary' if use_la else 'primary'} model ({model_name}): {e}")
+            _elapsed = time.time() - t
+            logger.error(f"[{stats_key}] API error after {_elapsed:.1f}s "
+                         f"model={model_name} | {type(e).__name__}: {e}")
             # Non-recoverable errors — retrying won't help; short-circuit to keep run time bounded.
             non_recoverable = (
                 'data_inspection_failed' in err_str or
