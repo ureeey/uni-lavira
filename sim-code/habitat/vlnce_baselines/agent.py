@@ -18,7 +18,7 @@ from habitat import logger
 
 from .prompts import *  # prompt constants used throughout the agent
 from .prompts import get_prompts
-from .utils.api import LaViRA_API
+from .utils.api import LaViRA_API, log_prompt, log_response, log_verbose
 from .utils.visualization import LaViRAVisualizer
 
 class VLMReasoningAgent:
@@ -111,8 +111,8 @@ class VLMReasoningAgent:
             return
 
         prompt_text = self.P.LA_PROMPT_LAST_OBJECT_GENERATOR.format(instruction=instruction)
-        logger.info("Generating Last Object...")
-        logger.info(prompt_text)
+        log_verbose("Generating Last Object...")
+        log_prompt(prompt_text)
 
         content = [{"type": "text", "text": prompt_text}]
         if initial_views:
@@ -135,8 +135,8 @@ class VLMReasoningAgent:
             log_path=log_path,
         )
 
-        logger.info('Last Object:')
-        logger.info("%s", output_text)
+        log_response('Last Object:')
+        log_response("%s", output_text)
         self.last_object = output_text.strip()
 
     def _build_nav_prompt(self, use_backtrack_prompt, negative_constraints, action_list_items, action_desc, feedback):
@@ -542,7 +542,7 @@ class VLMReasoningAgent:
                 feedback=feedback,
             )
 
-        logger.info(prompt)
+        log_prompt(prompt)
 
         content.append({"type": "text", "text": prompt})
 
@@ -563,8 +563,8 @@ class VLMReasoningAgent:
             log_path=log_path,
         )
 
-        logger.info('LA-response:')
-        logger.info(f"{output_text}")
+        log_response('LA-response:')
+        log_response(f"{output_text}")
         json_match = re.search(r'\{.*\}', output_text, re.DOTALL)
 
         retry_count = 0
@@ -577,7 +577,7 @@ class VLMReasoningAgent:
                 use_la=True,
                 log_path=log_path,
             )
-            logger.info('Retried.')
+            log_verbose('Retried.')
             json_match = re.search(r'\{.*\}', output_text, re.DOTALL)
             retry_count += 1
 
@@ -600,7 +600,7 @@ class VLMReasoningAgent:
                 # New diff-based mechanism: apply todo_updates if present
                 if 'todo_updates' in response_data and response_data['todo_updates']:
                     self._apply_todo_updates(response_data['todo_updates'])
-                    logger.info(f"Applied TODO updates. Current list: {self.todo_list}")
+                    log_verbose(f"Applied TODO updates. Current list: {self.todo_list}")
                 # Legacy fallback: support old 'updated_todo_list' field (full markdown rewrite)
                 elif 'updated_todo_list' in response_data:
                     legacy = response_data['updated_todo_list']
@@ -608,10 +608,10 @@ class VLMReasoningAgent:
                         legacy = "\n".join(legacy)
                     if isinstance(self.todo_list, list) and isinstance(legacy, str):
                         # Old format received but we have new structured - ignore
-                        logger.info("Ignoring legacy updated_todo_list field (using structured format)")
+                        log_verbose("Ignoring legacy updated_todo_list field (using structured format)")
                     else:
                         self.todo_list = legacy
-                        logger.info(f"Updated TODO List (legacy): {legacy}")
+                        log_response(f"Updated TODO List (legacy): {legacy}")
 
             action = response_data.get('action', 'navigate to forward')
             progress_analysis = response_data.get('progress_analysis', '')
@@ -624,7 +624,7 @@ class VLMReasoningAgent:
             self.stair = response_data.get('stair', False)
 
             if self.stair:
-                logger.info(f"DEBUG: LA Model detected stairs: {self.stair}")
+                log_verbose(f"DEBUG: LA Model detected stairs: {self.stair}")
             stop_signal = response_data.get('stop', False)
             action = action.lower()
 
@@ -693,13 +693,13 @@ class VLMReasoningAgent:
         # For other task types, last_object is not used (see _ensure_last_object).
         if self.task_type == "VLN" and hasattr(self.P, "LA_PROMPT_TODO_AND_LAST_OBJECT"):
             prompt_text = self.P.LA_PROMPT_TODO_AND_LAST_OBJECT.format(instruction=instruction)
-            logger.info("Generating initial TODO list + last object (merged)...")
+            log_verbose("Generating initial TODO list + last object (merged)...")
             log_purpose = "la_todo_and_last_object"
         else:
             prompt_text = self.P.LA_PROMPT_TODO_GENERATOR.format(instruction=instruction)
-            logger.info("Generating initial TODO list...")
+            log_verbose("Generating initial TODO list...")
             log_purpose = "la_todo_generator"
-        logger.info(prompt_text)
+        log_prompt(prompt_text)
 
         content = [{"type": "text", "text": prompt_text}]
         if initial_views:
@@ -722,12 +722,12 @@ class VLMReasoningAgent:
             log_path=log_path,
         )
 
-        logger.info('TODO+LastObject Output:' if self.task_type == "VLN" else 'TODO List Output:')
-        logger.info("%s", output_text)
+        log_response('TODO+LastObject Output:' if self.task_type == "VLN" else 'TODO List Output:')
+        log_response(str(output_text))
 
         # Parse JSON TODO list (also picks up last_object if present)
         self.todo_list = self._parse_todo_json(output_text, instruction)
-        logger.info(f"Parsed TODO list ({len(self.todo_list)} items): {self.todo_list}")
+        log_verbose(f"Parsed TODO list ({len(self.todo_list)} items): {self.todo_list}")
 
         if self.task_type == "VLN":
             import re as _re, json as _json
@@ -738,7 +738,7 @@ class VLMReasoningAgent:
                     lo = data.get("last_object", "")
                     if isinstance(lo, str) and lo.strip():
                         self.last_object = lo.strip()
-                        logger.info(f"Last Object (merged): {self.last_object}")
+                        log_verbose(f"Last Object (merged): {self.last_object}")
                 except Exception as e:
                     logger.warning(f"Failed to parse last_object from merged output: {e}")
 
@@ -816,7 +816,7 @@ class VLMReasoningAgent:
                         # back to "pending" — force LA to back up the claim with an
                         # observation, or it won't count as done.
                         if new_status == "completed" and (new_result is None or not str(new_result).strip()):
-                            logger.info(f"TODO idx={idx} completion lacks result; rolled back to pending")
+                            log_verbose(f"TODO idx={idx} completion lacks result; rolled back to pending")
                             new_status = "pending"
                         self.todo_list[idx]["status"] = new_status
                     if new_result is not None:
@@ -827,7 +827,7 @@ class VLMReasoningAgent:
                     if not isinstance(idx, int) or idx < 0 or idx >= len(self.todo_list):
                         continue
                     if self.todo_list[idx].get("status") == "completed":
-                        logger.info(f"TODO idx={idx} rewrite skipped (already completed)")
+                        log_verbose(f"TODO idx={idx} rewrite skipped (already completed)")
                         continue
                     if "content" in u and str(u["content"]).strip():
                         self.todo_list[idx]["content"] = str(u["content"])
@@ -935,7 +935,7 @@ class VLMReasoningAgent:
                 progress_info=progress_info,
                 planned_action=planned_action,
             )
-            logger.info(prompt)
+            log_prompt(prompt)
             content.append({
                 "type": "text",
                 "text": prompt
@@ -969,8 +969,8 @@ class VLMReasoningAgent:
                 log_path=log_path,
                 extra_body={"enable_thinking": False}
             )
-            logger.info('LLM Output:')
-            logger.info("%s", output_text)
+            log_response('LLM Output:')
+            log_response(str(output_text))
 
             # Try to parse JSON response
             import json
@@ -986,8 +986,8 @@ class VLMReasoningAgent:
                     log_path=log_path,
                     extra_body={"enable_thinking": False}
                 )
-                logger.info('Retried LLM Output:')
-                logger.info("%s", output_text)
+                log_response('Retried LLM Output:')
+                log_response(str(output_text))
                 json_match = re.search(r'\{.*\}', output_text, re.DOTALL)
                 retry_count += 1
 
@@ -1287,8 +1287,8 @@ class VLMReasoningAgent:
             log_path=log_path
         )
         
-        logger.info('Double-check response:')
-        logger.info(f"{output_text}")
+        log_response('Double-check response:')
+        log_response(f"{output_text}")
         
         # Parse response
         import json

@@ -70,3 +70,9 @@ __pycache__/
 # Render diagnostic artifacts
 test_render_*.png
 test_render_*.npy
+
+# Local development artifacts
+log.txt
+habitat-lab/
+install_groundingdino.sh
+.env.*

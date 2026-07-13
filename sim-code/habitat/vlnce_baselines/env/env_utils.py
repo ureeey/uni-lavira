@@ -148,10 +148,11 @@ def construct_envs(
             task_config.SIMULATOR.AGENT_0.SENSORS = config.SENSORS
 
             # Debug logging for config
-            logger.info(f"Proc {proc_id} Config Check:")
-            logger.info(f"  DATA_PATH: {task_config.DATASET.DATA_PATH}")
-            logger.info(f"  CONTENT_SCENES: {task_config.DATASET.CONTENT_SCENES}")
-            # logger.info(f"  EPISODES_ALLOWED: {task_config.DATASET.EPISODES_ALLOWED}")
+            if not int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+                logger.info(f"Proc {proc_id} Config Check:")
+                logger.info(f"  DATA_PATH: {task_config.DATASET.DATA_PATH}")
+                logger.info(f"  CONTENT_SCENES: {task_config.DATASET.CONTENT_SCENES}")
+                # logger.info(f"  EPISODES_ALLOWED: {task_config.DATASET.EPISODES_ALLOWED}")
 
             proc_config.freeze()
             configs.append(proc_config) 

@@ -136,7 +136,8 @@ def run_exp(exp_name: str, exp_config: str,
     os.makedirs(config.EVAL_CKPT_PATH_DIR, exist_ok=True)
     os.system("mkdir -p data/logs/running_log")
     logger.add_filehandler('data/logs/running_log/' + config.LOG_FILE)
-    logger.info(f"hyper parameters:\n{config.EVAL}")
+    if not int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+        logger.info(f"hyper parameters:\n{config.EVAL}")
     
     # dataset split, start multi-processes
     gpu_ids = config.TORCH_GPU_IDS
@@ -312,7 +313,8 @@ def run_exp(exp_name: str, exp_config: str,
             if not alive:
                 break
             elapsed = time.time() - start_time
-            logger.info(f"Progress check: {elapsed:.0f}s elapsed, {len(alive)}/{len(procs)} workers still running")
+            if not int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+                logger.info(f"Progress check: {elapsed:.0f}s elapsed, {len(alive)}/{len(procs)} workers still running")
             if elapsed > 36000:  # 10h safety timeout
                 logger.info("Timeout reached, terminating stragglers")
                 for p in alive:
@@ -341,9 +343,9 @@ def run_exp(exp_name: str, exp_config: str,
         logger.info("All processes terminated")
         return
     # Merge and print final statistics
-    logger.info("\n" + "="*50)
+    logger.info("=" * 50)
     logger.info("AGGREGATED STATISTICS ACROSS ALL PROCESSES")
-    logger.info("="*50)
+    logger.info("=" * 50)
     
     # Load and merge episode stats
     from collections import defaultdict
@@ -394,9 +396,9 @@ def run_exp(exp_name: str, exp_config: str,
         except:
             pass
     
-    logger.info("\n" + "="*50)
+    logger.info("=" * 50)
     logger.info("NAVIGATION STATISTICS")
-    logger.info("="*50)
+    logger.info("=" * 50)
     logger.info(f"Total Backtracks: {total_backtracks}")
     logger.info(f"Total Waypoints: {total_waypoints}")
     logger.info("="*50)

@@ -5,7 +5,49 @@ import io
 import base64
 import os
 import json
+import time
+import sys
 import numpy as np
+
+try:
+    import httpx
+except ImportError:
+    httpx = None
+
+# ── Logging verbosity controls (set via environment variables) ──────────────
+# LAVIRA_LOG_PROMPT: 0 = full (default), 1 = skip prompt templates, 2 = mute all
+# LAVIRA_LOG_VERBOSE: 0 = full (default), 1 = quiet (no ChatCompletion dumps, etc.)
+_LOG_PROMPT_LEVEL = int(os.environ.get("LAVIRA_LOG_PROMPT", "0"))
+_LOG_VERBOSE = int(os.environ.get("LAVIRA_LOG_VERBOSE", "0"))
+_LOG_NETWORK = int(os.environ.get("LAVIRA_LOG_NETWORK", "0"))
+
+
+def log_network(msg: str):
+    """Log network diagnostics — controlled by LAVIRA_LOG_NETWORK."""
+    if _LOG_NETWORK:
+        logger.info(f"[NET] {msg}")
+
+
+def log_prompt(msg: str):
+    """Log a prompt template — controlled by LAVIRA_LOG_PROMPT."""
+    if _LOG_PROMPT_LEVEL == 0:
+        logger.info(msg)
+    elif _LOG_PROMPT_LEVEL == 1:
+        pass  # skip templates
+    # level 2: skip silently
+
+
+def log_response(msg: str):
+    """Log a model response — controlled by LAVIRA_LOG_PROMPT."""
+    if _LOG_PROMPT_LEVEL <= 1:
+        logger.info(msg)
+    # level 2: skip silently
+
+
+def log_verbose(msg: str):
+    """Log optional detail — controlled by LAVIRA_LOG_VERBOSE."""
+    if _LOG_VERBOSE == 0:
+        logger.info(msg)
 
 
 def _clear_proxy_env():
@@ -28,28 +70,77 @@ def _restore_proxy_env(backup):
     os.environ.update(backup)
 
 
+def _build_http_client():
+    """Build an httpx.Client with network-diagnostic event hooks.
+
+    Returns None when LAVIRA_LOG_NETWORK is off (OpenAI uses its defaults).
+    When enabled, the hooks log every HTTP request/response pair so slow
+    requests can be pinpointed (DNS, TCP, TLS, or server-side wait).
+    """
+    if not _LOG_NETWORK or httpx is None:
+        return None
+
+    _req_start = {}
+
+    def _on_request(request):
+        _req_start[id(request)] = time.time()
+        _payload = len(request.content) if request.content else 0
+        log_network(f"HTTP → {request.method} {request.url}  ({_payload / 1024:.0f} KB)")
+
+    def _on_response(response):
+        req_id = id(response.request)
+        _start = _req_start.pop(req_id, time.time())
+        _elapsed = time.time() - _start
+        _slow = "  ⚠ SLOW!" if _elapsed > 30 else ""
+        log_network(f"HTTP ← {response.http_version} {response.status_code}  "
+                    f"{_elapsed:.1f}s{_slow}")
+        # Also log response headers that may help diagnose issues
+        if _elapsed > 30:
+            for key in ('x-request-id', 'x-ratelimit-remaining', 'retry-after'):
+                if key in response.headers:
+                    log_network(f"  header {key}: {response.headers[key]}")
+
+    return httpx.Client(
+        event_hooks={'request': [_on_request], 'response': [_on_response]},
+        timeout=httpx.Timeout(2000.0, connect=10.0),
+    )
+
+
 class LaViRA_API:
 
     def __init__(self, la_api_key=None, la_base_url=None, la_model_name="gpt-4-vision-preview",
                  va_model_name=None, va_api_key=None, va_base_url=None):
+        # Log proxy env state before clearing (controlled by LAVIRA_LOG_NETWORK).
+        log_network(f"Proxy env at init: "
+                    f"ALL_PROXY={os.environ.get('ALL_PROXY','')!r}  "
+                    f"all_proxy={os.environ.get('all_proxy','')!r}  "
+                    f"HTTP_PROXY={os.environ.get('HTTP_PROXY','')!r}  "
+                    f"HTTPS_PROXY={os.environ.get('HTTPS_PROXY','')!r}  "
+                    f"NO_PROXY={os.environ.get('NO_PROXY','')!r}")
+
         # Clear proxy env vars so httpx doesn't choke on unsupported schemes (e.g. socks://).
         # The API endpoint already encodes the real routing target via base_url.
         _proxy_backup = _clear_proxy_env()
         try:
+            _http_client = _build_http_client()
             self.la_client = OpenAI(
                 api_key=la_api_key,
                 base_url=la_base_url,
-                timeout=2000
+                timeout=2000,
+                http_client=_http_client,
             )
             self.la_model_name = la_model_name
+            log_network(f"LA client created: base_url={la_base_url}  model={la_model_name}")
 
             if va_model_name:
                 self.va_client = OpenAI(
                     api_key=va_api_key,
                     base_url=va_base_url,
-                    timeout=2000
+                    timeout=2000,
+                    http_client=_build_http_client(),
                 )
                 self.va_model_name = va_model_name
+                log_network(f"VA client created: base_url={va_base_url}  model={va_model_name}")
             else:
                 self.va_client = None
                 self.va_model_name = None
@@ -57,6 +148,8 @@ class LaViRA_API:
             _restore_proxy_env(_proxy_backup)
 
         self.reset_stats()
+        self._la_round = 0
+        self._va_round = 0
 
     def image_to_base64(self, image):
         """Convert a PIL Image or numpy array to a base64-encoded string."""
@@ -134,7 +227,6 @@ class LaViRA_API:
             max_retries: Maximum number of retries
         """
         # use_la = False
-        import time
         t = time.time()
         # select the client and model to use
         if use_la and self.la_client:
@@ -155,8 +247,24 @@ class LaViRA_API:
         # Estimate payload size for debugging.
         _msg_str = json.dumps(messages, ensure_ascii=False)
         _payload_kb = len(_msg_str.encode('utf-8')) / 1024
-        logger.info(f"[{stats_key}] Calling {model_name} | messages={len(messages)} "
-                    f"payload={_payload_kb:.0f} KB timeout=120s ...")
+        if use_la:
+            self._la_round += 1
+            label = f"LA #{self._la_round}"
+        else:
+            self._va_round += 1
+            label = f"VA #{self._va_round}"
+        # When the progress bar is active (VERBOSE=1), its \r leaves the cursor
+        # mid-line.  Emit a newline so subsequent output starts on a clean line.
+        if _LOG_VERBOSE:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+        _t0 = time.time()
+        _proxy_state = (f"HTTP_PROXY={os.environ.get('HTTP_PROXY','')!r}  "
+                        f"HTTPS_PROXY={os.environ.get('HTTPS_PROXY','')!r}")
+        log_network(f"{label}  target={model_name}  payload={_payload_kb:.0f}KB  {_proxy_state}")
+        bar = "─" * 40
+        logger.info(f"▐ {label} → {model_name}  {_payload_kb:.0f} KB")
 
         try:
             _call_t = time.time()
@@ -181,8 +289,8 @@ class LaViRA_API:
                     extra_body=extra_body,
                     **kwargs
                 )
-            logger.info(f"[{stats_key}] Response received in {time.time() - _call_t:.1f}s")
-            logger.info(response)
+            _elapsed = time.time() - _call_t
+            log_verbose(str(response))
             # Handle case where response is a string (e.g. from some proxies or raw returns)
             if isinstance(response, str):
                 logger.info(f"API returned string response for {model_name}")
@@ -193,15 +301,17 @@ class LaViRA_API:
             # update usage statistics
             self.stats[stats_key]['calls'] += 1
             if hasattr(response, 'usage') and response.usage:
-                logger.info(f"API Call usage - {response.usage}")
+                log_verbose(f"API Call usage - {response.usage}")
                 self.stats[stats_key]['input_tokens'] += response.usage.prompt_tokens or 0
                 self.stats[stats_key]['output_tokens'] += response.usage.completion_tokens or 0
                 self.stats[stats_key]['total_tokens'] += response.usage.total_tokens or 0
 
-                logger.info(f"{stats_key.upper()} model usage - Input: {response.usage.prompt_tokens}, "
-                            f"Output: {response.usage.completion_tokens}, Total: {response.usage.total_tokens}")
-
-            logger.info(f'Generating uses {time.time() - t} seconds.')
+                logger.info(f"▐ {label}  ✓ {_elapsed:.1f}s  |  "
+                            f"in:{response.usage.prompt_tokens}  out:{response.usage.completion_tokens}  "
+                            f"total:{response.usage.total_tokens}")
+                _slow = "  ⚠ SLOW!" if _elapsed > 30 else ""
+                log_network(f"{label}  ✓ {_elapsed:.1f}s  "
+                            f"in={response.usage.prompt_tokens}  out={response.usage.completion_tokens}{_slow}")
             content = response.choices[0].message.content
             self._save_debug_info(log_path, messages, content)
             return content
@@ -209,8 +319,12 @@ class LaViRA_API:
         except Exception as e:
             err_str = str(e)
             _elapsed = time.time() - t
+            _proxy_at_err = (f"HTTP_PROXY={os.environ.get('HTTP_PROXY','')!r}  "
+                             f"HTTPS_PROXY={os.environ.get('HTTPS_PROXY','')!r}")
             logger.error(f"[{stats_key}] API error after {_elapsed:.1f}s "
                          f"model={model_name} | {type(e).__name__}: {e}")
+            log_network(f"{label}  ✗ FAIL {_elapsed:.1f}s  "
+                        f"{type(e).__name__}: {str(e)[:200]}  {_proxy_at_err}")
             # Non-recoverable errors — retrying won't help; short-circuit to keep run time bounded.
             non_recoverable = (
                 'data_inspection_failed' in err_str or
@@ -226,7 +340,6 @@ class LaViRA_API:
                 return "Error: Failed to get response from API after max retries"
 
             logger.info(f'Forcing retry ({retries + 1}/{max_retries})..')
-            import time
             time.sleep(30)
             return self.generate(messages, images, max_new_tokens, temperature, use_la, log_path=log_path, retries=retries + 1, max_retries=max_retries, **kwargs)
 
