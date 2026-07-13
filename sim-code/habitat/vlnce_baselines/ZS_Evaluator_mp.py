@@ -58,7 +58,7 @@ IPlannerAgent = None
 try:
     from policy_agent import NavDP_Agent
 except ImportError as _e:
-    logger.warning(f"NavDP import failed ({_e}); --use-navdp will fail loudly when used.")
+    logger.debug(f"NavDP import failed ({_e}); --use-navdp will fail loudly when used.")
     NavDP_Agent = None
 
 import warnings
@@ -952,13 +952,24 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             #    (consume the result of the previous step's action)
             # =================================================================
             if dones[0]:
+                if int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
                 self._calculate_metric(infos, submitted_answer=getattr(self, 'last_submitted_answer', None))
                 return
             self.visualizer.instruction = self.instruction
             self.visualizer.destination = self.destination
             self.visualizer._action = self._action
 
-            logger.info(f"\nepisode:{self.current_episode_id}, step:{step}")
+            if int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+                # In-place progress line (overwrites itself, no scroll spam).
+                bar_width = 30
+                filled = int(bar_width * min(step / 500, 1.0))
+                bar = "█" * filled + "░" * (bar_width - filled)
+                sys.stdout.write(f"\r  ep{self.current_episode_id}  [{bar}]  step {step}/500")
+                sys.stdout.flush()
+            else:
+                logger.info(f"\nepisode:{self.current_episode_id}, step:{step}")
 
             gray_depth = self.visualizer._save_depth(obs[0]['depth'], step, use_colormap=False)
 
@@ -1424,7 +1435,8 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                             if use_special_controller:
                                 traj_np = None  # Initialize to avoid undefined variable error
                                 if selected_controller == 'iplanner':
-                                    logger.info(f"DEBUG: Step 2 - Using iPlanner (stair={self.agent.stair})")
+                                    if not int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+                                        logger.info(f"DEBUG: Step 2 - Using iPlanner (stair={self.agent.stair})")
                                     # Calculate local goal from target_map_x, target_map_y
                                     # Convert map indices to world meters
                                     tx = target_map_x * self.resolution / 100.0
@@ -1711,7 +1723,8 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                                 global_traj.append([wx, wy, zb])
                             self.navdp_traj_global = np.array(global_traj)
                             self.last_iplanner_step = step
-                            logger.info(f"DEBUG: iPlanner generated trajectory with {len(global_traj)} points in Step 3")
+                            if not int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+                                logger.info(f"DEBUG: iPlanner generated trajectory with {len(global_traj)} points in Step 3")
                         else:
                             # Use stored global traj -> local
                             if self.navdp_traj_global is not None and len(self.navdp_traj_global) > 0:
@@ -1920,7 +1933,8 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                         
                         action_list.append(action_id)
                     elif not use_special_controller and self.use_fmm:
-                        logger.info(f"DEBUG: Step 3 - Using FMM. use_iplanner={self.use_iplanner}, use_navdp={self.use_navdp}, stair={self.agent.stair}")
+                        if not int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+                            logger.info(f"DEBUG: Step 3 - Using FMM. use_iplanner={self.use_iplanner}, use_navdp={self.use_navdp}, stair={self.agent.stair}")
                         # Clear special controller trajectories to avoid stale visualization
                         self.navdp_traj_global = None
                         self.navdp_local_traj = None
