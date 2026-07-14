@@ -73,6 +73,7 @@ test_render_*.npy
 
 # Local development artifacts
 log.txt
+log_api_block.txt
 habitat-lab/
 install_groundingdino.sh
 .env.*
