@@ -17,7 +17,6 @@ flag="--exp-name ${TIMESTAMP}
       --run-type eval
       --exp-config vlnce_baselines/config/objectnav_v2.yaml
       --nprocesses ${NPROC:-20}
-      --use-navdp
       --episode-file data/datasets/stratified_samples/hm3d_v2.json
       NUM_ENVIRONMENTS 1
       TRAINER_NAME ZS-Evaluator-mp
