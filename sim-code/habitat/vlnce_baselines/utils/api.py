@@ -7,12 +7,26 @@ import os
 import json
 import time
 import sys
+import socket
 import numpy as np
 
 try:
     import httpx
 except ImportError:
     httpx = None
+
+# ── Force IPv4 ─────────────────────────────────────────────────────
+# Alibaba Cloud NLB returns AAAA (IPv6) records that are often unreachable
+# from certain ISPs.  httpx's Happy Eyeballs tries IPv6 first, and the
+# default TCP connect timeout (10 s) means each failed v6 attempt wastes
+# ~10 s before falling back to v4.  Monkey-patching socket.getaddrinfo to
+# always request AF_INET eliminates that overhead.
+_orig_getaddrinfo = socket.getaddrinfo
+
+def _getaddrinfo_ipv4(host, port, family=0, type=0, proto=0, flags=0):
+    return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+socket.getaddrinfo = _getaddrinfo_ipv4
 
 # ── Logging verbosity controls (set via environment variables) ──────────────
 # LAVIRA_LOG_PROMPT: 0 = full (default), 1 = skip prompt templates, 2 = mute all
@@ -101,6 +115,7 @@ def _build_http_client():
                     log_network(f"  header {key}: {response.headers[key]}")
 
     return httpx.Client(
+        http2=True,
         event_hooks={'request': [_on_request], 'response': [_on_response]},
         timeout=httpx.Timeout(2000.0, connect=10.0),
     )
