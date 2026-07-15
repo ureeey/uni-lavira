@@ -38,6 +38,10 @@ class VLMReasoningAgent:
         # LA / VA endpoint config is read from environment (see .env.example).
         # Six env vars match the prior LaViRA release naming convention:
         #   LA_API_KEY, LA_BASE_URL, LA_MODEL_NAME, VA_API_KEY, VA_BASE_URL, VA_MODEL_NAME.
+        # Set LAVIRA_API_FORMAT=dashscope to use the DashScope native SDK instead of
+        # the default OpenAI-compatible HTTP path.
+        use_dashscope = os.environ.get('LAVIRA_API_FORMAT', 'openai') == 'dashscope'
+
         va_api_key    = os.environ.get('VA_API_KEY', '')
         va_base_url   = os.environ.get('VA_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
         va_model_name = os.environ.get('VA_MODEL_NAME', 'qwen3.5-27b')
@@ -45,16 +49,27 @@ class VLMReasoningAgent:
         la_api_key    = os.environ.get('LA_API_KEY', '')
         la_base_url   = os.environ.get('LA_BASE_URL', 'https://yunwu.ai/v1')
         la_model_name = os.environ.get('LA_MODEL_NAME', 'gemini-3.5-flash')
-        if not la_api_key or not va_api_key:
-            raise RuntimeError(
-                "LA_API_KEY and VA_API_KEY must be set as environment variables "
-                "(see .env.example). LA = language agent, VA = vision agent."
-            )
+
+        if use_dashscope:
+            dashscope_api_key = os.environ.get('DASHSCOPE_API_KEY', la_api_key or va_api_key)
+            if not dashscope_api_key:
+                raise RuntimeError(
+                    "DASHSCOPE_API_KEY must be set when LAVIRA_API_FORMAT=dashscope"
+                )
+        else:
+            if not la_api_key or not va_api_key:
+                raise RuntimeError(
+                    "LA_API_KEY and VA_API_KEY must be set as environment variables "
+                    "(see .env.example). LA = language agent, VA = vision agent."
+                )
         logger.info(f"todolist:{use_todo_list}, backtrack_second_chance:{backtrack_second_chance}")
+        logger.info(f"API format={'dashscope' if use_dashscope else 'openai'}")
         logger.info(f"LA model={la_model_name} base={la_base_url}")
         logger.info(f"VA model={va_model_name} base={va_base_url}")
 
         self.model = LaViRA_API(
+            use_dashscope=use_dashscope,
+            dashscope_api_key=os.environ.get('DASHSCOPE_API_KEY', ''),
             la_api_key=la_api_key,
             la_base_url=la_base_url,
             la_model_name=la_model_name,

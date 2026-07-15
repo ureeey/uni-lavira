@@ -98,7 +98,7 @@ def _is_rxr_dataset(cfg) -> bool:
     return False
 
 def run_exp(exp_name: str, exp_config: str,
-            run_type: str, nprocesses: int, opts=None, use_navdp: bool = False, use_fmm: bool = True, debug_episodes: str = None, episode_file: str = None, resume_from_log: str = None) -> None:
+            run_type: str, nprocesses: int, opts=None, use_navdp: bool = False, use_fmm: bool = True, debug_episodes: str = None, episode_file: str = None, resume_from_log: str = None, api_format: str = None) -> None:
     r"""Runs experiment given mode and config
 
     Args:
@@ -109,6 +109,11 @@ def run_exp(exp_name: str, exp_config: str,
     Returns:
         None.
     """
+    # Set API format early so agent.py picks it up via env var
+    if api_format:
+        os.environ['LAVIRA_API_FORMAT'] = api_format
+        logger.info(f"API format set to: {api_format}")
+
     config = get_config(exp_config, opts)
     config.defrost()
     config.TENSORBOARD_DIR += exp_name
@@ -542,12 +547,32 @@ if __name__ == "__main__":
         help="path to config yaml containing info about experiment",
     )
     parser.add_argument(
+        "--api-format",
+        type=str,
+        default=None,
+        choices=["openai", "dashscope"],
+        help="API format: 'openai' (OpenAI-compatible, default) or 'dashscope' (DashScope native SDK). "
+             "Overrides the LAVIRA_API_FORMAT env var.",
+    )
+    parser.add_argument(
         "opts",
         default=None,
         nargs=argparse.REMAINDER,
         help="Modify config options from command line",
     )
     args = parser.parse_args()
+    # --api-format may appear after the REMAINDER opts and get swallowed;
+    # scan opts to extract it and remove from opts list so config merge doesn't choke.
+    if args.api_format is None and args.opts:
+        try:
+            idx = args.opts.index('--api-format')
+            if idx + 1 < len(args.opts):
+                args.api_format = args.opts[idx + 1]
+                # Remove both the flag and its value from opts
+                args.opts.pop(idx)       # remove value
+                args.opts.pop(idx)       # remove --api-format
+        except ValueError:
+            pass
     logger.info(args)
 
     mp.set_start_method('spawn', force=True)
