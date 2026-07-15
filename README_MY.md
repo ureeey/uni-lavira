@@ -15,6 +15,7 @@
 
 ## 可视化
 
+> 运行前请先确保目录下（例如saved_rgb_images/test-ovon/2518）没有以前测试残留的图片。
 ```bash
 python watch_viz.py --auto
 ```

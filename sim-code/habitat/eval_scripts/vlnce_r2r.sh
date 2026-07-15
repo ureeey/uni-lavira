@@ -6,8 +6,10 @@ export BERT_LOCAL_PATH=data/grounded_sam/bert-base-uncased
 export TOKENIZERS_PARALLELISM=false
 export GLOG_minloglevel=0
 export MAGNUM_LOG=verbose
-export EGL_PLATFORM=surfaceless
-unset DISPLAY
+# NOTE: Commented out because this habitat-sim build was compiled without --headless EGL support.
+# It needs X11/GLX rendering (DISPLAY must stay set).
+# export EGL_PLATFORM=surfaceless
+# unset DISPLAY
 
 TIMESTAMP=$(date +"%m%d-%H%M%S")
 mkdir -p logs
