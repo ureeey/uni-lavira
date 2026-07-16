@@ -35,6 +35,7 @@ class LaViRA_API:
     """
 
     def __init__(self, use_dashscope=False, dashscope_api_key=None,
+                 dashscope_base_url=None,
                  la_api_key=None, la_base_url=None, la_model_name="gpt-4-vision-preview",
                  va_model_name=None, va_api_key=None, va_base_url=None):
         self.use_dashscope = use_dashscope
@@ -44,6 +45,7 @@ class LaViRA_API:
                 dashscope_api_key=dashscope_api_key or la_api_key or va_api_key or '',
                 la_model_name=la_model_name,
                 va_model_name=va_model_name,
+                dashscope_base_url=dashscope_base_url,
             )
         else:
             self._backend = LaViRA_OpenAI_API(

@@ -98,7 +98,7 @@ def _is_rxr_dataset(cfg) -> bool:
     return False
 
 def run_exp(exp_name: str, exp_config: str,
-            run_type: str, nprocesses: int, opts=None, use_navdp: bool = False, use_fmm: bool = True, debug_episodes: str = None, episode_file: str = None, resume_from_log: str = None, api_format: str = None) -> None:
+            run_type: str, nprocesses: int, opts=None, use_navdp: bool = False, use_fmm: bool = True, debug_episodes: str = None, episode_file: str = None, resume_from_log: str = None, api_format: str = None, dashscope_maas: bool = False) -> None:
     r"""Runs experiment given mode and config
 
     Args:
@@ -113,6 +113,9 @@ def run_exp(exp_name: str, exp_config: str,
     if api_format:
         os.environ['LAVIRA_API_FORMAT'] = api_format
         logger.info(f"API format set to: {api_format}")
+    if dashscope_maas:
+        os.environ['DASHSCOPE_USE_MAAS'] = '1'
+        logger.info("DashScope MaaS mode: using dedicated workspace endpoint")
 
     config = get_config(exp_config, opts)
     config.defrost()
@@ -555,24 +558,38 @@ if __name__ == "__main__":
              "Overrides the LAVIRA_API_FORMAT env var.",
     )
     parser.add_argument(
+        "--dashscope-maas",
+        action="store_true",
+        default=False,
+        help="DashScope mode: use MaaS dedicated workspace (derived from VA_BASE_URL) "
+             "instead of the public dashscope.aliyuncs.com. Gives dedicated resources "
+             "but inherits the MaaS gateway body-size limit (~22MB).",
+    )
+    parser.add_argument(
         "opts",
         default=None,
         nargs=argparse.REMAINDER,
         help="Modify config options from command line",
     )
     args = parser.parse_args()
-    # --api-format may appear after the REMAINDER opts and get swallowed;
-    # scan opts to extract it and remove from opts list so config merge doesn't choke.
-    if args.api_format is None and args.opts:
-        try:
-            idx = args.opts.index('--api-format')
-            if idx + 1 < len(args.opts):
-                args.api_format = args.opts[idx + 1]
-                # Remove both the flag and its value from opts
-                args.opts.pop(idx)       # remove value
-                args.opts.pop(idx)       # remove --api-format
-        except ValueError:
-            pass
+    # --api-format / --dashscope-maas may appear after REMAINDER opts;
+    # scan opts to extract them so config merge doesn't choke.
+    _bool_flags = {'--dashscope-maas'}
+    _val_flags  = {'--api-format'}
+    if args.opts:
+        i = 0
+        while i < len(args.opts):
+            tok = args.opts[i]
+            if tok in _bool_flags:
+                setattr(args, tok[2:].replace('-', '_'), True)
+                args.opts.pop(i)
+            elif tok in _val_flags and i + 1 < len(args.opts):
+                if getattr(args, tok[2:].replace('-', '_'), None) is None:
+                    setattr(args, tok[2:].replace('-', '_'), args.opts[i + 1])
+                args.opts.pop(i)       # value
+                args.opts.pop(i)       # flag
+            else:
+                i += 1
     logger.info(args)
 
     mp.set_start_method('spawn', force=True)

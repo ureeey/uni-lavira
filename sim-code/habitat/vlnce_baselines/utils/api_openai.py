@@ -34,12 +34,50 @@ socket.getaddrinfo = _getaddrinfo_ipv4
 _LOG_PROMPT_LEVEL = int(os.environ.get("LAVIRA_LOG_PROMPT", "0"))
 _LOG_VERBOSE = int(os.environ.get("LAVIRA_LOG_VERBOSE", "0"))
 _LOG_NETWORK = int(os.environ.get("LAVIRA_LOG_NETWORK", "0"))
+_LOG_BODY = int(os.environ.get("LAVIRA_LOG_BODY", "0"))
 
 
 def log_network(msg: str):
     """Log network diagnostics — controlled by LAVIRA_LOG_NETWORK."""
     if _LOG_NETWORK:
         logger.info(f"[NET] {msg}")
+
+
+def _log_body(messages, label=""):
+    """Log the actual message content structure — image format, count, sizes."""
+    if not _LOG_BODY:
+        return
+    img_sources = []
+    total_text_chars = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total_text_chars += len(content)
+        elif isinstance(content, list):
+            for item in content:
+                if item.get("type") == "text":
+                    total_text_chars += len(item["text"])
+                elif item.get("type") == "image_url":
+                    url = item["image_url"]["url"]
+                    if url.startswith("data:"):
+                        size_kb = len(url) / 1024
+                        img_sources.append(f"base64 ({size_kb:.0f} KB)")
+                    elif url.startswith("oss://"):
+                        img_sources.append(f"oss://  ({len(url):.0f} B)")
+                    elif url.startswith("http"):
+                        img_sources.append(f"http   ({len(url):.0f} B)")
+                    else:
+                        img_sources.append(f"other  ({len(url):.0f} B)")
+
+    total_body_kb = total_text_chars / 1024 + sum(
+        len(item.get("image_url", {}).get("url", "")) / 1024
+        for msg in messages if isinstance(msg.get("content", []), list)
+        for item in msg["content"] if item.get("type") == "image_url"
+    )
+
+    summary = ", ".join(img_sources) if img_sources else "no images"
+    logger.info(f"[BODY] {label}  {len(img_sources)} imgs  |  {summary}  |  "
+                f"text: {total_text_chars/1024:.0f} KB  body: {total_body_kb:.0f} KB")
 
 
 def log_prompt(msg: str):
@@ -91,7 +129,7 @@ def _build_http_client():
     When enabled, the hooks log every HTTP request/response pair so slow
     requests can be pinpointed (DNS, TCP, TLS, or server-side wait).
     """
-    if not _LOG_NETWORK or httpx is None:
+    if not (_LOG_NETWORK or _LOG_BODY) or httpx is None:
         return None
 
     _req_start = {}
@@ -100,6 +138,10 @@ def _build_http_client():
         _req_start[id(request)] = time.time()
         _payload = len(request.content) if request.content else 0
         log_network(f"HTTP → {request.method} {request.url}  ({_payload / 1024:.0f} KB)")
+        if _LOG_BODY:
+            ct = request.headers.get('content-type', '?')
+            logger.info(f"[BODY HTTP] {request.method} {request.url}  "
+                        f"body={_payload/1024:.0f} KB  content-type={ct}")
 
     def _on_response(response):
         req_id = id(response.request)
@@ -119,6 +161,45 @@ def _build_http_client():
         event_hooks={'request': [_on_request], 'response': [_on_response]},
         timeout=httpx.Timeout(2000.0, connect=10.0),
     )
+
+
+class _LatencyEstimator:
+    """Online estimation of API latency model:  latency = x + output_tokens / k.
+
+    Uses decoupled exponential moving average updates after each call.
+    """
+
+    def __init__(self, x0=3.0, k0=30.0, alpha=0.3):
+        self.x = x0       # fixed overhead (seconds)
+        self.k = k0       # token generation speed (tokens / second)
+        self.alpha = alpha
+        self.x_max = 0.0          # peak overhead (excludes initial x0)
+        self.k_min = float('inf') # slowest speed (excludes initial k0)
+
+    def update(self, output_tokens: int, elapsed_sec: float):
+        """Incorporate a new observation (n output tokens, t seconds)."""
+        n = max(output_tokens, 1)
+        t = max(elapsed_sec, 0.1)
+
+        # ── Update x (overhead) ──────────────────────────────────────
+        x_obs = t - n / max(self.k, 1)
+        x_obs = max(0.1, min(60.0, x_obs))
+        self.x = self.alpha * x_obs + (1 - self.alpha) * self.x
+        if self.x > self.x_max:
+            self.x_max = self.x
+
+        # ── Update k (token speed) ───────────────────────────────────
+        # Only update k when the model is physically consistent (x < t).
+        # When x >= t, the overhead estimate exceeds the total time,
+        # making k_obs = n/0.1 meaningless — skip to avoid a vicious
+        # cycle where high x → high k → small n/k → x stays high.
+        net = t - self.x
+        if net > 0.1:
+            k_obs = n / net
+            k_obs = max(5.0, min(500.0, k_obs))
+            self.k = self.alpha * k_obs + (1 - self.alpha) * self.k
+            if self.k < self.k_min:
+                self.k_min = self.k
 
 
 class LaViRA_OpenAI_API:
@@ -165,6 +246,8 @@ class LaViRA_OpenAI_API:
         self.reset_stats()
         self._la_round = 0
         self._va_round = 0
+        self._lat_la = _LatencyEstimator(x0=3.0, k0=30.0, alpha=0.3)
+        self._lat_va = _LatencyEstimator(x0=3.0, k0=30.0, alpha=0.3)
 
     def image_to_base64(self, image):
         """Convert a PIL Image or numpy array to a base64-encoded string."""
@@ -282,6 +365,7 @@ class LaViRA_OpenAI_API:
         logger.info(f"▐ {label} → {model_name}  {_payload_kb:.0f} KB")
 
         try:
+            _log_body(messages, f"{label} OpenAI msg format")
             _call_t = time.time()
             if stats_key == 'Language Action Model':
                 response = client.chat.completions.create(
@@ -320,10 +404,21 @@ class LaViRA_OpenAI_API:
                 self.stats[stats_key]['input_tokens'] += response.usage.prompt_tokens or 0
                 self.stats[stats_key]['output_tokens'] += response.usage.completion_tokens or 0
                 self.stats[stats_key]['total_tokens'] += response.usage.total_tokens or 0
+                # Track elapsed time
+                s = self.stats[stats_key]
+                s['elapsed_total'] += _elapsed
+                if _elapsed > s['elapsed_max']:
+                    s['elapsed_max'] = _elapsed
+                if _elapsed < s['elapsed_min']:
+                    s['elapsed_min'] = _elapsed
 
+                # Update latency model:  t = x + out/k
+                _lat = self._lat_la if use_la else self._lat_va
+                _lat.update(response.usage.completion_tokens or 0, _elapsed)
                 logger.info(f"▐ {label}  ✓ {_elapsed:.1f}s  |  "
                             f"in:{response.usage.prompt_tokens}  out:{response.usage.completion_tokens}  "
-                            f"total:{response.usage.total_tokens}")
+                            f"total:{response.usage.total_tokens}  "
+                            f"x={_lat.x:.1f}s  k={_lat.k:.0f}tok/s")
                 _slow = "  ⚠ SLOW!" if _elapsed > 30 else ""
                 log_network(f"{label}  ✓ {_elapsed:.1f}s  "
                             f"in={response.usage.prompt_tokens}  out={response.usage.completion_tokens}{_slow}")
@@ -373,33 +468,59 @@ class LaViRA_OpenAI_API:
 
     def print_usage_stats(self):
         """Log detailed usage statistics and return a summary dict."""
-        total_calls = self.stats['Language Action Model']['calls'] + self.stats['Vision Action Model']['calls']
-        total_tokens = self.stats['Language Action Model']['total_tokens'] + self.stats['Vision Action Model']['total_tokens']
-        if self.la_client:
-            logger.info("=== MODEL USAGE STATISTICS ===")
-            logger.info(f"Language Action Model ({self.la_model_name}):")
-            logger.info(f"  - Calls: {self.stats['Language Action Model']['calls']}")
-            logger.info(f"  - Input tokens: {self.stats['Language Action Model']['input_tokens']:,}")
-            logger.info(f"  - Output tokens: {self.stats['Language Action Model']['output_tokens']:,}")
-            logger.info(f"  - Total tokens: {self.stats['Language Action Model']['total_tokens']:,}")
+        la = self.stats['Language Action Model']
+        va = self.stats['Vision Action Model']
 
-        if self.va_client:
-            logger.info(f"Vision Action Model ({self.va_model_name}):")
-            logger.info(f"  - Calls: {self.stats['Vision Action Model']['calls']}")
-            logger.info(f"  - Input tokens: {self.stats['Vision Action Model']['input_tokens']:,}")
-            logger.info(f"  - Output tokens: {self.stats['Vision Action Model']['output_tokens']:,}")
-            logger.info(f"  - Total tokens: {self.stats['Vision Action Model']['total_tokens']:,}")
+        def _fmt_time(s):
+            if s == 0 or s == float('inf'):
+                return '    -'
+            return f'{s:5.1f}s'
 
-        logger.info(f"TOTAL:")
-        logger.info(f"  - Total calls: {total_calls}")
-        logger.info(f"  - Total tokens: {total_tokens:,}")
-        logger.info("===============================")
+        def _print_section(title, model_name, s, lat):
+            n = s['calls']
+            if n == 0:
+                return
+            logger.info(f"  {title} ({model_name}):")
+            logger.info(f"    Calls:          {n:>6d}")
+            logger.info(f"    Time total:     {_fmt_time(s['elapsed_total'])}")
+            logger.info(f"    Time avg:       {_fmt_time(s['elapsed_total'] / n)}")
+            logger.info(f"    Time max:       {_fmt_time(s['elapsed_max'])}")
+            logger.info(f"    Time min:       {_fmt_time(s['elapsed_min'] if s['elapsed_min'] != float('inf') else 0)}")
+            logger.info(f"    Input tokens:   {s['input_tokens']:>8,}")
+            logger.info(f"    Output tokens:  {s['output_tokens']:>8,}")
+            logger.info(f"    Total tokens:   {s['total_tokens']:>8,}")
+            logger.info(f"    Avg out / call: {s['output_tokens'] / n:>8.0f}")
+            logger.info(f"    Max latency x:  {_fmt_time(lat.x_max)}")
+            logger.info(f"    Min latency k:  {lat.k_min if lat.k_min != float('inf') else 0:>5.0f} tok/s")
 
+        logger.info("==================== MODEL USAGE STATISTICS ====================")
+        _print_section("LA", self.la_model_name, la, self._lat_la)
+        _print_section("VA", self.va_model_name, va, self._lat_va)
+
+        # ── Combined ─────────────────────────────────────────────────
+        total_calls = la['calls'] + va['calls']
+        total_tokens = la['total_tokens'] + va['total_tokens']
+        total_elapsed = la['elapsed_total'] + va['elapsed_total']
+        total_out = la['output_tokens'] + va['output_tokens']
+        comb_max = max(la['elapsed_max'], va['elapsed_max'])
+        comb_min_min = min(la['elapsed_min'], va['elapsed_min'])
+        comb_min = comb_min_min if comb_min_min != float('inf') else 0
+
+        logger.info(f"  ───────────────────────────────────────────")
+        logger.info(f"  COMBINED:")
+        logger.info(f"    Calls:          {total_calls:>6d}")
+        logger.info(f"    Time total:     {_fmt_time(total_elapsed)}")
+        logger.info(f"    Time avg:       {_fmt_time(total_elapsed / max(1, total_calls))}")
+        logger.info(f"    Time max:       {_fmt_time(comb_max)}")
+        logger.info(f"    Time min:       {_fmt_time(comb_min)}")
+        logger.info(f"    Input tokens:   {la['input_tokens'] + va['input_tokens']:>8,}")
+        logger.info(f"    Output tokens:  {total_out:>8,}")
+        logger.info(f"    Total tokens:   {total_tokens:>8,}")
+        logger.info(f"    Avg out / call: {total_out / max(1, total_calls):>8.0f}")
+        logger.info("================================================================")
         return {
-            'la': self.stats['Language Action Model'].copy(),
-            'va': self.stats['Vision Action Model'].copy(),
-            'total_calls': total_calls,
-            'total_tokens': total_tokens
+            'la': la.copy(), 'va': va.copy(),
+            'total_calls': total_calls, 'total_tokens': total_tokens,
         }
 
     def reset_stats(self):
@@ -409,14 +530,16 @@ class LaViRA_OpenAI_API:
                 'calls': 0,
                 'input_tokens': 0,
                 'output_tokens': 0,
-                'total_tokens': 0
+                'total_tokens': 0,
+                'elapsed_total': 0.0, 'elapsed_max': 0.0, 'elapsed_min': float('inf'),
             },
             'Vision Action Model': {
                 'calls': 0,
                 'input_tokens': 0,
                 'output_tokens': 0,
-                'total_tokens': 0
-            }
+                'total_tokens': 0,
+                'elapsed_total': 0.0, 'elapsed_max': 0.0, 'elapsed_min': float('inf'),
+            },
         }
 
     def eval(self):

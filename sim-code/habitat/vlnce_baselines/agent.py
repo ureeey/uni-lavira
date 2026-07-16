@@ -63,13 +63,27 @@ class VLMReasoningAgent:
                     "(see .env.example). LA = language agent, VA = vision agent."
                 )
         logger.info(f"todolist:{use_todo_list}, backtrack_second_chance:{backtrack_second_chance}")
-        logger.info(f"API format={'dashscope' if use_dashscope else 'openai'}")
-        logger.info(f"LA model={la_model_name} base={la_base_url}")
-        logger.info(f"VA model={va_model_name} base={va_base_url}")
+
+        # DashScope MaaS mode: use dedicated workspace /api/v1 instead of public
+        dashscope_base_url = None
+        if use_dashscope:
+            dashscope_use_maas = os.environ.get('DASHSCOPE_USE_MAAS', '') == '1'
+            if dashscope_use_maas:
+                maas_url = va_base_url or la_base_url or ''
+                if maas_url and '/compatible-mode/v1' in maas_url:
+                    dashscope_base_url = maas_url.replace('/compatible-mode/v1', '/api/v1')
+            logger.info(f"API format=dashscope  "
+                        f"LA={la_model_name}  VA={va_model_name}  "
+                        f"endpoint={'MaaS' if dashscope_base_url else 'public'}")
+        else:
+            logger.info(f"API format=openai  "
+                        f"LA={la_model_name}  base={la_base_url}  "
+                        f"VA={va_model_name}  base={va_base_url}")
 
         self.model = LaViRA_API(
             use_dashscope=use_dashscope,
             dashscope_api_key=os.environ.get('DASHSCOPE_API_KEY', ''),
+            dashscope_base_url=dashscope_base_url,
             la_api_key=la_api_key,
             la_base_url=la_base_url,
             la_model_name=la_model_name,

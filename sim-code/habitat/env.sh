@@ -29,3 +29,5 @@ export LAVIRA_LOG_VERBOSE=1
 export GLOG_minloglevel=1
 export LAVIRA_LOG_NETWORK=0
 # Alternative if glog doesn't work: export HABITAT_SIM_LOG=warning
+
+export LAVIRA_LOG_BODY=0
