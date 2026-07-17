@@ -24,6 +24,7 @@ flag="--exp-name hm3d-ovon-${TIMESTAMP}
       TRAINER_NAME ZS-Evaluator-mp
       TORCH_GPU_IDS [0]
       SIMULATOR_GPU_IDS [0]
+      --api-format dashscope
       "
 
 echo "Starting experiment: hm3d-ovon-${TIMESTAMP}"
