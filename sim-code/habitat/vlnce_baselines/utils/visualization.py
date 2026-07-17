@@ -147,14 +147,17 @@ class LaViRAVisualizer:
 
     def _save_rgb_with_bbox(self, rgb_image, bbox, target_coords=None):
         """Save RGB image with bounding box annotation as a separate file
-        
+
         Args:
             rgb_image: RGB image to save
             bbox: Bounding box dictionary
             target_coords: Optional (x, y) tuple of target point to visualize
+
+        Returns:
+            np.ndarray or None: Annotated RGB image, or None if visualize is disabled.
         """
         if not self.visualize:
-            return
+            return None
 
         try:
             # Convert RGB image to proper format
@@ -237,8 +240,11 @@ class LaViRAVisualizer:
 
             # logger.info(f"Saved RGB with bbox annotation: {filepath}")
 
+            return annotated_image
+
         except Exception as e:
             logger.info(f"Error saving RGB with bbox: {e}")
+            return None
 
     def _save_depth(
             self,

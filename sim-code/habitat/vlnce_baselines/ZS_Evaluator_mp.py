@@ -19,6 +19,7 @@ from torch import Tensor
 from torchvision import transforms
 from tqdm import tqdm
 
+import os as _os
 from habitat import logger
 from habitat_extensions.measures import NDTW
 from habitat.core.simulator import Observations
@@ -66,7 +67,17 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from .agent import VLMReasoningAgent
+from .agent_v2 import VLMReasoningAgentV2
 
+# V2 log switches (set via env.sh)
+_V2_LOG_DECIDE = int(_os.environ.get("LAVIRA_V2_LOG_DECIDE", "1"))
+_V2_LOG_ACT    = int(_os.environ.get("LAVIRA_V2_LOG_ACT", "1"))
+_V2_LOG_FMM    = int(_os.environ.get("LAVIRA_V2_LOG_FMM", "1"))
+
+def _v2log(flag, *args, **kwargs):
+    """Log a message if *flag* is truthy."""
+    if flag:
+        logger.info(*args, **kwargs)
 
 
 @baseline_registry.register_trainer(name="ZS-Evaluator-mp")
@@ -117,6 +128,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
         self.visited_targets = []  # List of targets the agent has identified/visited
         self.history_images = [] # Initialize history images
         self.current_step = 0  # Track current step for navigation decisions
+        self.bbox_history_images = []  # rollout_v2: bbox-annotated frames for loop detection
 
         # Distance thresholds for target management (in map units)
         # 0.75 meter threshold (75 cm / resolution)
@@ -158,6 +170,17 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             log_dir=debug_log_dir,
             use_todo_list=self.use_todo_list,
             backtrack_second_chance=self.backtrack_second_chance,
+        )
+        self.agent_v2 = VLMReasoningAgentV2(
+            self.visualizer,
+            task_type=self.task_type,
+            use_guideline=False,
+            use_working_memory=False,
+            allow_move_behind=False,
+            debug_logging=debug_logging,
+            log_dir=debug_log_dir,
+            use_todo_list=False,
+            backtrack_second_chance=False,
         )
 
         # The IPlanner backend was removed; this flag stays False so the inert
@@ -697,6 +720,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
         # Reset target tracking
         self.visited_targets = []
         self.history_images = []
+        self.bbox_history_images = []
         self.current_step = 0
         self.backtrack_steps = 0
         self.last_submitted_answer = None  # EQA: set when agent submits final answer
@@ -880,6 +904,9 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
         """
         Execute a whole episode using bounding box target navigation
         """
+        if getattr(self.config, 'ROLLOUT_V2', False):
+            return self.rollout_v2()
+
         if self.use_navdp:
             self.navdp_agent.reset_env(0)
 
@@ -1654,6 +1681,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                                     self.detected_classes, search_destination
                                 )
                                 action_list.append(navigation_action)
+                                logger.info(f"[V1-FMM] step={step} action={navigation_action}")
                             elif not use_special_controller and not self.use_fmm:
                                 logger.warning("Step 2 - FMM is disabled and no other planner took over! This should not happen due to init validation.")
                             break
@@ -1988,6 +2016,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                             self.detected_classes, search_destination
                         )
                         action_list.append(navigation_action)
+                        logger.info(f"[V1-FMM] step={step} action={navigation_action}")
                     else:
                         logger.warning("Step 3 - FMM is disabled and no other planner took over!")
                     # logger.info(f"Added navigation action: {navigation_action}")
@@ -2001,6 +2030,8 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                 self._action = action_list[0]
                 action_list.pop(0)
                 actions = [{"action": self._action}]
+
+                logger.info(f"[V1-ACT] step={step} execute action={self._action}")
 
                 outputs = self.envs.step(actions)
                 step += 1
@@ -2058,6 +2089,294 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             action_step += 1
         self._calculate_metric(infos, submitted_answer=getattr(self, 'last_submitted_answer', None), is_timeout=True)
 
+    def rollout_v2(self):
+        """Simplified rollout: FMM-only, per-frame VLM decision, no panorama spin."""
+
+        # ------------------------------------------------------------------
+        # 1. INITIALIZATION
+        # ------------------------------------------------------------------
+        obs, full_pose = self._maps_initialization()
+
+        # Check allowed episodes (same as rollout)
+        if getattr(self, 'allowed_episodes', None) is not None:
+            current_ep = self.envs.current_episodes()[0]
+            is_allowed = False
+            for allowed_id, allowed_scene_id in self.allowed_episodes:
+                if str(current_ep.episode_id) == allowed_id:
+                    if current_ep.scene_id.endswith(allowed_scene_id) or \
+                       os.path.basename(current_ep.scene_id) == os.path.basename(allowed_scene_id):
+                        is_allowed = True
+                        break
+            if not is_allowed:
+                ep_info = f"{current_ep.episode_id} ({os.path.basename(current_ep.scene_id)})"
+                logger.info(f"Skipping episode {ep_info} (Not in assignment)")
+                return
+
+        dones = [False] * self.config.NUM_ENVIRONMENTS
+        infos = [{}] * self.config.NUM_ENVIRONMENTS
+
+        self._action = None
+        action_list = []
+        collided = 0
+        search_destination = False
+        current_pose = full_pose[0] if full_pose is not None else None
+        self.bbox_history_images = []
+
+        # Target tracking for persistent FMM nav (like v1 Step 3)
+        target_map_x, target_map_y = None, None
+        target_set_step = None
+        nav_to_visible = False  # guard only checks when approaching a visible target
+        max_steps_to_target = 15
+
+        full_map = self.mapping_module.get_full_map()
+        step = 0
+        action_step = 0
+
+        while step < self.max_step:
+            # ==============================================================
+            # ANALYZE STATE
+            # ==============================================================
+            if dones[0]:
+                if int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                self._calculate_metric(infos)
+                return
+
+            pos = self.envs.call_at(0, '_env')._sim.get_agent_state().position
+            self.pos_list.append(pos)
+
+            self.visualizer.instruction = self.instruction
+            self.visualizer.destination = self.destination
+            self.visualizer._action = self._action
+
+            if int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+                bar_width = 30
+                filled = int(bar_width * min(step / 500, 1.0))
+                bar = "█" * filled + "░" * (bar_width - filled)
+                sys.stdout.write(f"\r  ep{self.current_episode_id}  [{bar}]  step {step}/500")
+                sys.stdout.flush()
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            else:
+                _v2log(_V2_LOG_DECIDE, f"\n--PLAN episode:{self.current_episode_id}, step:{step}")
+
+            self.visualizer._save_depth(obs[0]['depth'], step, use_colormap=False)
+
+            last_pose = current_pose
+            current_pose = full_pose[0]
+            self.current_step = step
+            self.visualizer.sync(step, self.current_episode_id)
+
+            position = current_pose[:2] * 100 / self.resolution
+            agent_map_x, agent_map_y = int(position[0]), int(position[1])
+
+            self.visualizer._save_rgb_frame(obs[0], step, self.visited_targets,
+                                            self.current_episode_id, None)
+
+            if self.use_continuous_history and step % self.history_interval == 0:
+                rgb_to_save = obs[0]['rgb'].copy()
+                if isinstance(rgb_to_save, np.ndarray):
+                    if rgb_to_save.dtype != np.uint8:
+                        rgb_to_save = (rgb_to_save * 255).astype(np.uint8)
+                    img_save = Image.fromarray(rgb_to_save)
+                else:
+                    img_save = rgb_to_save
+                self.history_images.append({'step': step, 'image': img_save})
+
+            # ==============================================================
+            # DECIDE — per-frame VLM decision, or FMM-only when navigating
+            # ==============================================================
+            if not action_list:
+                # --- Target timeout check (same as v1) ---
+                if target_map_x is not None and target_set_step is not None:
+                    if step - target_set_step >= max_steps_to_target:
+                        _v2log(_V2_LOG_DECIDE, "--PLAN target timeout → reset")
+                        target_map_x, target_map_y = None, None
+                        target_set_step = None
+                        nav_to_visible = False
+
+                # --- Distance-to-target check (same as v1) ---
+                if target_map_x is not None and target_map_y is not None:
+                    dist = np.sqrt((target_map_x - agent_map_x) ** 2 +
+                                   (target_map_y - agent_map_y) ** 2)
+                    if dist < self.target_reached_threshold:
+                        _v2log(_V2_LOG_DECIDE, f"--PLAN target reached (dist={dist * self.resolution / 100:.2f}m) → reset")
+                        target_map_x, target_map_y = None, None
+                        target_set_step = None
+                        nav_to_visible = False
+
+                if target_map_x is not None and target_map_y is not None:
+                    # --- Navigation phase: keep FMM-ing toward stored target ---
+                    _v2log(_V2_LOG_DECIDE, f"--PLAN NAV step (target=({target_map_x},{target_map_y}), {step - target_set_step}s elapsed)")
+                    waypoint = np.array([target_map_y, target_map_x])
+                    navigation_action = self.policy._get_action(
+                        current_pose, waypoint, full_map[0], self.traversable,
+                        self.collision_map, step, self.current_episode_id,
+                        self.detected_classes, False,
+                    )
+                    action_list.append(navigation_action)
+                    _v2log(_V2_LOG_FMM, f"---FMM step={step} action={navigation_action}")
+                else:
+                    # --- VLM decision phase: no target, call agent stubs ---
+                    _v2log(_V2_LOG_DECIDE, "--PLAN DECIDE step")
+                    f = obs[0]['rgb'].copy()
+                    instruction = self.instruction
+
+                    if self.agent_v2.is_target_visible(instruction, f):
+                        if self.agent_v2.is_target_near(instruction, f):
+                            _v2log(_V2_LOG_DECIDE, "--PLAN visible → NEAR → STOP")
+                            action_list.append(HabitatSimActions.STOP)
+                        else:
+                            bbox = self.agent_v2.target_bbox(instruction, f)
+                            _v2log(_V2_LOG_DECIDE, f"--PLAN visible → FAR → bbox({bbox['x1']},{bbox['y1']},{bbox['x2']},{bbox['y2']}) → FMM")
+                            self.visualizer._save_rgb_with_bbox(f, bbox)
+                            target_map_x, target_map_y = self._v2_bbox_to_target(bbox, obs[0]['depth'], current_pose)
+                            target_set_step = step
+                            nav_to_visible = True
+                            # Emit first FMM action
+                            waypoint = np.array([target_map_y, target_map_x])
+                            navigation_action = self.policy._get_action(
+                                current_pose, waypoint, full_map[0], self.traversable,
+                                self.collision_map, step, self.current_episode_id,
+                                self.detected_classes, False,
+                            )
+                            action_list.append(navigation_action)
+                            _v2log(_V2_LOG_FMM, f"---FMM step={step} action={navigation_action}")
+                    else:
+                        if self.agent_v2.is_target_possible(instruction, f):
+                            bbox = self.agent_v2.possible_bbox(instruction, f)
+                            f_ann = self.visualizer._save_rgb_with_bbox(f, bbox)
+
+                            if self.agent_v2.is_repeat(self.bbox_history_images, f_ann):
+                                _v2log(_V2_LOG_DECIDE, f"--PLAN possible → bbox({bbox['x1']},{bbox['y1']},{bbox['x2']},{bbox['y2']}) → REPEAT → TURN_RIGHT×3")
+                                action_list.extend([HabitatSimActions.TURN_RIGHT] * 3)
+                            else:
+                                _v2log(_V2_LOG_DECIDE, f"--PLAN possible → bbox({bbox['x1']},{bbox['y1']},{bbox['x2']},{bbox['y2']}) → NEW → FMM")
+                                self.bbox_history_images.append(f_ann)
+                                target_map_x, target_map_y = self._v2_bbox_to_target(bbox, obs[0]['depth'], current_pose)
+                                target_set_step = step
+                                waypoint = np.array([target_map_y, target_map_x])
+                                navigation_action = self.policy._get_action(
+                                    current_pose, waypoint, full_map[0], self.traversable,
+                                    self.collision_map, step, self.current_episode_id,
+                                    self.detected_classes, False,
+                                )
+                                action_list.append(navigation_action)
+                                _v2log(_V2_LOG_FMM, f"---FMM step={step} action={navigation_action}")
+                        else:
+                            _v2log(_V2_LOG_DECIDE, "--PLAN not visible/possible → TURN_RIGHT×3")
+                            action_list.extend([HabitatSimActions.TURN_RIGHT] * 3)
+
+            # ==============================================================
+            # ACT — execute action
+            # ==============================================================
+            if action_list:
+                self._action = action_list.pop(0)
+                actions = [{"action": self._action}]
+
+                _v2log(_V2_LOG_ACT, f"----ACT step={step} execute action={self._action}")
+
+                outputs = self.envs.step(actions)
+                step += 1
+
+                obs, _, dones, infos = [list(x) for x in zip(*outputs)]
+
+                if not dones[0]:
+                    batch_obs = self._batch_obs(obs)
+                    poses = torch.from_numpy(np.array([item['sensor_pose'] for item in obs])).float().to(self.device)
+                    self.mapping_module(batch_obs, poses, self.current_step)
+                    full_map, full_pose, one_step_full_map = \
+                        self.mapping_module.update_map(step, self.detected_classes, self.current_episode_id)
+                    self.mapping_module.one_step_full_map.fill_(0.)
+                    self.mapping_module.one_step_local_map.fill_(0.)
+
+                    self.traversable, self.floor, self.frontiers = self._process_map(step, full_map[0])
+                    self.one_step_floor = self._process_one_step_floor(one_step_full_map[0])
+
+                    last_pose = current_pose
+                    current_pose = full_pose[0]
+                    if last_pose is not None and current_pose is not None:
+                        displacement = calculate_displacement(last_pose, current_pose, self.resolution)
+                        if displacement < 0.2 * 100 / self.resolution:
+                            collided += 1
+                        else:
+                            collided = 0
+                        if collided >= 30:
+                            fname = os.path.join(self.config.EVAL_CKPT_PATH_DIR,
+                                                 f"r{self.local_rank}_w{self.world_size}_collision_stuck.txt")
+                            with open(fname, "a") as f:
+                                f.writelines(
+                                    f"id: {str(self.current_episode_id)}; step: {str(step)}; collided: {str(collided)}\n")
+
+                    current_action = self._action
+                    if last_pose is not None and current_action is not None and current_action == 1:
+                        collision_map = collision_check_fmm(last_pose, current_pose, self.resolution,
+                                                            self.mapping_module.map_shape)
+                        self.collision_map = np.logical_or(self.collision_map, collision_map)
+                    self.traversable[self.collision_map == 1] = 0
+                else:
+                    self._calculate_metric(infos)
+                    return
+
+                # --- Navigation guard: per-step visibility check ---
+                # Only after at least one FMM-only step (skip the step right
+                # after DECIDE, whose visibility was just confirmed by VLM).
+                # Only guard when approaching a visible target, not when
+                # exploring towards a possible area.
+                if (target_map_x is not None and target_map_y is not None
+                        and nav_to_visible
+                        and not dones[0]
+                        and step - target_set_step > 1):
+                    f = obs[0]['rgb'].copy()
+                    if not self.agent_v2.is_target_visible(self.instruction, f):
+                        _v2log(_V2_LOG_ACT, "----ACT target lost visibility → abort nav")
+                        self._save_debug_img(f, step, "target_lost")
+                        action_list.clear()
+                        target_map_x, target_map_y = None, None
+                        target_set_step = None
+                        nav_to_visible = False
+                    elif self.agent_v2.is_target_near(self.instruction, f):
+                        _v2log(_V2_LOG_ACT, "----ACT target near → STOP")
+                        action_list.clear()
+                        action_list.append(HabitatSimActions.STOP)
+
+            action_step += 1
+
+        self._calculate_metric(infos, is_timeout=True)
+
+    def _save_debug_img(self, rgb, step, label):
+        """Save a debug snapshot (e.g. 'target_lost') to the episode directory."""
+        try:
+            import cv2
+            ep_dir = os.path.join(self.save_dir, str(self.current_episode_id))
+            os.makedirs(ep_dir, exist_ok=True)
+            if rgb.dtype != np.uint8:
+                rgb = (rgb * 255).astype(np.uint8)
+            fname = os.path.join(ep_dir, f"debug_{label}_step{step:04d}.png")
+            cv2.imwrite(fname, cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+        except Exception:
+            pass
+
+    def _v2_bbox_to_target(self, bbox, depth_obs, current_pose):
+        """Convert a bbox to map-coordinate target. Returns (tx, ty)."""
+        depth_m = self._preprocess_depth(depth_obs, 0.1, 5.0) / 100.0
+        while True:
+            target = get_world_xz_from_pixel(
+                bbox=bbox,
+                depth_image=depth_m,
+                full_pose=current_pose,
+                camera_intrinsics=self._get_camera_intrinsics(),
+            )
+            tx = int(target[0] * 100.0 / self.resolution)
+            ty = int(target[1] * 100.0 / self.resolution)
+            tx = max(0, min(tx, self.map_shape[0] - 1))
+            ty = max(0, min(ty, self.map_shape[1] - 1))
+            # Accept if traversable or depth is nearly zero (same retry as v1)
+            if self.traversable[ty, tx] == 1 or depth_m.max() < 0.1:
+                return tx, ty
+            depth_m = depth_m - 0.1  # try a shallower depth
+
     def eval(self):
         # Load detailed assignments if available. File is namespaced by exp_name
         # (derived from the unique EVAL_CKPT_PATH_DIR) to allow parallel runs.
@@ -2100,9 +2419,12 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
 
         self.envs.close()
 
-        # Print final statistics
+        # Print final statistics (merge v1 + v2 if rollout_v2 is active)
         logger.info("=== FINAL MODEL USAGE STATISTICS ===")
-        final_stats = self.agent.model.print_usage_stats()
+        if getattr(self.config, 'ROLLOUT_V2', False):
+            final_stats = self.agent_v2.model.print_usage_stats()
+        else:
+            final_stats = self.agent.model.print_usage_stats()
 
         split = self.config.TASK_CONFIG.DATASET.SPLIT
         fname = os.path.join(self.config.EVAL_CKPT_PATH_DIR,
@@ -2208,7 +2530,10 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             except Exception:
                 pass
 
-        final_stats = self.agent.model.print_usage_stats()
+        if getattr(self.config, 'ROLLOUT_V2', False):
+            final_stats = self.agent_v2.model.print_usage_stats()
+        else:
+            final_stats = self.agent.model.print_usage_stats()
         split = self.config.TASK_CONFIG.DATASET.SPLIT
         stem = f"{split}_r{self.local_rank}_w{self.world_size}"
         with open(os.path.join(self.config.EVAL_CKPT_PATH_DIR, f"stats_ep_ckpt_{stem}.json"), "w") as f:

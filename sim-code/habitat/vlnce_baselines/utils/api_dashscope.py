@@ -23,7 +23,7 @@ except ImportError:
     dashscope = None
 
 # ── Logging verbosity (shared env vars with api_openai.py) ────────────
-_LOG_PROMPT_LEVEL = int(os.environ.get("LAVIRA_LOG_PROMPT", "0"))
+_LOG_PROMPT_LEVEL = int(os.environ.get("LAVIRA_LOG_PROMPT_OUT", "0"))
 _LOG_VERBOSE = int(os.environ.get("LAVIRA_LOG_VERBOSE", "0"))
 _LOG_NETWORK = int(os.environ.get("LAVIRA_LOG_NETWORK", "0"))
 _LOG_BODY = int(os.environ.get("LAVIRA_LOG_BODY", "0"))
@@ -236,17 +236,23 @@ class LaViRA_DashScope_API:
             logger.info(f"    Min latency k:  {lat.k_min if lat.k_min != float('inf') else 0:>5.0f} tok/s")
 
         logger.info("==================== MODEL USAGE STATISTICS ====================")
-        _print_section("LA", self.la_model_name, la, self._lat_la)
-        _print_section("VA", self.va_model_name, va, self._lat_va)
+
+        # Print each stats bucket.
+        for key in sorted(self.stats.keys()):
+            s = self.stats[key]
+            model_name = self.la_model_name if key == 'Language Action Model' else self.va_model_name
+            lat = self._lat_la if key == 'Language Action Model' else self._lat_va
+            _print_section(key, model_name, s, lat)
 
         # ── Combined ─────────────────────────────────────────────────
-        total_calls = la['calls'] + va['calls']
-        total_tokens = la['total_tokens'] + va['total_tokens']
-        total_elapsed = la['elapsed_total'] + va['elapsed_total']
-        total_out = la['output_tokens'] + va['output_tokens']
-        comb_max = max(la['elapsed_max'], va['elapsed_max'])
-        comb_min_min = min(la['elapsed_min'], va['elapsed_min'])
-        comb_min = comb_min_min if comb_min_min != float('inf') else 0
+        total_calls = sum(s['calls'] for s in self.stats.values())
+        total_tokens = sum(s['total_tokens'] for s in self.stats.values())
+        total_elapsed = sum(s['elapsed_total'] for s in self.stats.values())
+        total_out = sum(s['output_tokens'] for s in self.stats.values())
+        elapsed_values = [s['elapsed_max'] for s in self.stats.values()]
+        elapsed_min_values = [s['elapsed_min'] for s in self.stats.values() if s['elapsed_min'] != float('inf')]
+        comb_max = max(elapsed_values) if elapsed_values else 0
+        comb_min = min(elapsed_min_values) if elapsed_min_values else 0
 
         logger.info(f"  ───────────────────────────────────────────")
         logger.info(f"  COMBINED:")
@@ -255,15 +261,18 @@ class LaViRA_DashScope_API:
         logger.info(f"    Time avg:       {_fmt_time(total_elapsed / max(1, total_calls))}")
         logger.info(f"    Time max:       {_fmt_time(comb_max)}")
         logger.info(f"    Time min:       {_fmt_time(comb_min)}")
-        logger.info(f"    Input tokens:   {la['input_tokens'] + va['input_tokens']:>8,}")
+        logger.info(f"    Input tokens:   {sum(s['input_tokens'] for s in self.stats.values()):>8,}")
         logger.info(f"    Output tokens:  {total_out:>8,}")
         logger.info(f"    Total tokens:   {total_tokens:>8,}")
         logger.info(f"    Avg out / call: {total_out / max(1, total_calls):>8.0f}")
         logger.info("================================================================")
-        return {
-            'la': la.copy(), 'va': va.copy(),
-            'total_calls': total_calls, 'total_tokens': total_tokens,
-        }
+        # Build backward-compatible return (see merge_model_usage_stats in stats.py).
+        _result = {'total_calls': total_calls, 'total_tokens': total_tokens}
+        for _k, _v in self.stats.items():
+            _result[_k] = _v.copy()
+        _result.setdefault('la', self.stats.get('Language Action Model', {}).copy())
+        _result.setdefault('va', self.stats.get('Vision Action Model', {}).copy())
+        return _result
 
     def eval(self):
         """Compatibility no-op."""
@@ -342,25 +351,48 @@ class LaViRA_DashScope_API:
     # ── generation ─────────────────────────────────────────────────────
 
     def generate(self, messages, images=None, max_new_tokens=1024, temperature=0.7,
-                 use_la=False, log_path=None, retries=0, max_retries=5, **kwargs):
+                 use_la=False, log_path=None, retries=0, max_retries=5, label=None, **kwargs):
         """Unified generate interface — identical signature to the OpenAI path."""
         return self._generate_dashscope(
             messages=messages, max_new_tokens=max_new_tokens, temperature=temperature,
             use_la=use_la, log_path=log_path, retries=retries, max_retries=max_retries,
-            **kwargs,
+            label=label, **kwargs,
         )
 
     def _generate_dashscope(self, messages, max_new_tokens=1024, temperature=0.7,
-                            use_la=False, log_path=None, retries=0, max_retries=5, **kwargs):
+                            use_la=False, log_path=None, retries=0, max_retries=5,
+                            label=None, **kwargs):
         model_name = self.la_model_name if (use_la and self.la_model_name) else self.va_model_name
-        stats_key = 'Language Action Model' if use_la else 'Vision Action Model'
 
-        if use_la:
+        # When a custom label is provided, unify stats under that key.
+        if label:
+            stats_key = label
+        elif use_la:
+            stats_key = 'Language Action Model'
+        else:
+            stats_key = 'Vision Action Model'
+
+        if label:
+            if not hasattr(self, '_custom_rounds'):
+                self._custom_rounds = {}
+            self._custom_rounds[label] = self._custom_rounds.get(label, 0) + 1
+            label = f"{label} #{self._custom_rounds[label]}"
+        elif use_la:
             self._la_round += 1
             label = f"LA #{self._la_round}"
         else:
             self._va_round += 1
             label = f"VA #{self._va_round}"
+
+        # Ensure stats slot exists for custom labels.
+        if stats_key not in self.stats:
+            self.stats[stats_key] = {
+                'calls': 0,
+                'input_tokens': 0,
+                'output_tokens': 0,
+                'total_tokens': 0,
+                'elapsed_total': 0.0, 'elapsed_max': 0.0, 'elapsed_min': float('inf'),
+            }
 
         _msg_str = json.dumps(messages, ensure_ascii=False)
         _payload_kb = len(_msg_str.encode('utf-8')) / 1024
@@ -417,7 +449,8 @@ class LaViRA_DashScope_API:
                 if _elapsed < s['elapsed_min']:
                     s['elapsed_min'] = _elapsed
                 # Update latency model:  t = x + out/k
-                _lat = self._lat_la if use_la else self._lat_va
+                # Custom labels (e.g. "V2") route through the VA model, same as use_la=False.
+                _lat = self._lat_la if (use_la and stats_key == 'Language Action Model') else self._lat_va
                 _lat.update(output_tokens, _elapsed)
                 logger.info(f"▐ {label}  ✓ {_elapsed:.1f}s  |  "
                             f"in:{input_tokens}  out:{output_tokens}  total:{total_tokens}  "
@@ -468,5 +501,5 @@ class LaViRA_DashScope_API:
             return self._generate_dashscope(
                 messages=messages, max_new_tokens=max_new_tokens, temperature=temperature,
                 use_la=use_la, log_path=log_path, retries=retries + 1,
-                max_retries=max_retries, extra_body=extra_body,
+                max_retries=max_retries, label=label, extra_body=extra_body,
             )

@@ -204,3 +204,117 @@ SEED=1 bash eval_scripts/hm3d_ovon.sh
 SEED=2 bash eval_scripts/hm3d_ovon.sh
 # 然后手工聚合三次结果，计算每个 episode 的均值 ± 标准差
 ```
+
+## Rollout V2
+
+出于提升速度、简化prompt设计的考虑，提出新的 ObjNav 导航策略与相应的prompt模板。用 VLM 多轮对话链替代四步全景图→LA→VA→planner 管线。
+
+### 启用方式
+
+```bash
+python run_mp.py ... --rollout-v2
+# 或放在 REMAINDER opts 中（如果前面有 TRAINER_NAME 等 positional args）
+python run_mp.py ... TRAINER_NAME ZS-Evaluator-mp ... --rollout-v2
+```
+
+### 架构
+
+| | V1 | V2 |
+|---|---|---|
+| 感知 | 全景图 (12步旋转, 4帧) | 单帧 RGB |
+| 决策 | LA (全景→方向) + VA (RGB-D→bbox) | VLM 多轮对话链 (6个方法) |
+| 规划 | FMM / NavDP / iPlanner | 仅 FMM |
+| 停止 | STOP double-check (额外 LA 调用) | is_target_near 直接判断 |
+
+### 新增/修改文件
+
+| 文件 | 状态 | 说明 |
+|------|------|------|
+| `vlnce_baselines/agent_v2.py` | 新增 | `VLMReasoningAgentV2` 继承 `VLMReasoningAgent`，6 个逐帧 VLM 方法 |
+| `vlnce_baselines/prompts/prompts_objnav_v2.py` | 新增 | V2 英文 prompt 模板 |
+| `vlnce_baselines/ZS_Evaluator_mp.py` | 修改 | +`rollout_v2()`, `_v2_bbox_to_target()`, `_save_debug_img()` |
+| `run_mp.py` | 修改 | `--rollout-v2` CLI 参数 |
+| `vlnce_baselines/utils/api_openai.py` | 修改 | `label` 参数统一统计分组; `LAVIRA_LOG_PROMPT`→`LAVIRA_LOG_PROMPT_OUT` |
+| `vlnce_baselines/utils/api_dashscope.py` | 修改 | 同上 |
+| `vlnce_baselines/utils/visualization.py` | 修改 | `_save_rgb_with_bbox` 返回 annotated image |
+| `env.sh` | 修改 | V2 日志控制开关 |
+
+### V2 状态机
+
+```
+Loop:
+  ├─ 超时/距离/丢失检查 → 清 target
+  ├─ 有 target 且未超时 → NAV: FMM 持续导航，不调 VLM
+  └─ 无 target → DECIDE:
+       ├─ visible → NEAR → STOP
+       ├─ visible → FAR → bbox → 存 target → FMM (nav_to_visible=True)
+       ├─ possible → NEW → bbox → 存 target → FMM (nav_to_visible=False)
+       ├─ possible → REPEAT → TURN_RIGHT×3 (90°)
+       └─ not visible/possible → TURN_RIGHT×3 (90°)
+
+ACT 后 guard (仅 nav_to_visible=True 且 ≥1 步后):
+  ├─ target lost → 清空 → save debug img → 回 DECIDE
+  └─ target near → STOP
+```
+
+### 关键设计决策
+
+1. **仅 FMM** — 移除 NavDP/iPlanner
+2. **无全景图** — 从单帧 RGB 决策
+3. **持久导航** — VLM 设定 waypoint 后 FMM 持续走 (max 15步)
+4. **深度回退** — `_v2_bbox_to_target` 投影点不可通行时递减重试
+5. **Guard 仅可见目标** — `nav_to_visible=True` 时才检查，possible 探索不浪费 API
+6. **90° 旋转** — 单次 TURN_RIGHT×3 (30°×3=90°)，和 v1 LA 转向粒度一致
+7. **Bbox 历史** — annotated frame 用于 `is_repeat` 走圈检测
+8. **Target name 提取** — "Find the pillow" → "pillow"
+
+### 日志控制
+
+```bash
+export LAVIRA_V2_LOG_DECIDE=1   # --PLAN   (2 dashes)
+export LAVIRA_V2_LOG_ACT=1      # ----ACT  (4 dashes)
+export LAVIRA_V2_LOG_FMM=1      # ---FMM   (3 dashes)
+export LAVIRA_V2_LOG_REQ=2      # -REQ     (1 dash; 0=off,1=incremental,2=full)
+```
+
+### 实验结果
+
+#### ep2513 (HM3D-OVON, target: pillow, 简单场景)
+
+| | V1 | V2 |
+|---|---|---|
+| API 调用 | 8 (5 LA + 3 VA) | 14 |
+| API 耗时 | 44s | 31s |
+| 总耗时 | 76s | 41s |
+| Tokens | 15,929 | 5,936 (-63%) |
+| Steps | 58 | 11 |
+| Path | 0.9m | 1.5m |
+| SPL | 1.0 | 0.94 |
+| Success | ✓ | ✓ |
+
+#### ep2469 (HM3D-OVON, target: picture, 复杂场景)
+
+| | V1 | V2 |
+|---|---|---|
+| API 调用 | 18 (10 LA + 8 VA) | 68 |
+| API 耗时 | 130s | 144s |
+| 总耗时 | 225s | 229s |
+| Tokens | 75,654 | 54,830 (-28%) |
+| Steps | 166 | 128 |
+| Path | 8.2m | 15.3m (+87%) |
+| SPL | 0.19 | 0.10 |
+| Success | ✓ | ✓ |
+
+V2 行为分解 (68 调用 / 108 DECIDE+NAV 周期):
+- `visible → FAR → FMM`: 1 次
+- `possible → NEW → FMM`: 12 次 (博运气探索)
+- `not visible/possible → TURN_RIGHT`: 9 次 (全盲转 90°)
+- REPEAT: 1 次
+
+### Claude Cli + Deepseek-V4-Pro 认为的问题
+
+1. **单帧视野窄** — 无全景图，大量步数浪费在旋转探索上，复杂场景路径长度大幅增加
+2. **调用次数多** — 每步 2-6 次小 API 调用，但每次极轻量 (avg output 4-8 tokens)
+3. **`possible` 不可靠** — `is_target_possible`/`possible_bbox` 经常选错探索方向
+4. **无 STOP double-check** — `is_target_near` 直接决定停止
+5. **无 backtrack** — 陷入死角无法回退
