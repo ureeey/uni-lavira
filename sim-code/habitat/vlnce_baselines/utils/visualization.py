@@ -145,13 +145,14 @@ class LaViRAVisualizer:
     def update_map(self, mapping_module):
         self.mapping_module = mapping_module
 
-    def _save_rgb_with_bbox(self, rgb_image, bbox, target_coords=None):
+    def _save_rgb_with_bbox(self, rgb_image, bbox, target_coords=None, label=None):
         """Save RGB image with bounding box annotation as a separate file
 
         Args:
             rgb_image: RGB image to save
             bbox: Bounding box dictionary
             target_coords: Optional (x, y) tuple of target point to visualize
+            label: Optional suffix for filename (e.g. 'front', 'right')
 
         Returns:
             np.ndarray or None: Annotated RGB image, or None if visualize is disabled.
@@ -231,7 +232,10 @@ class LaViRAVisualizer:
             os.makedirs(img_folder, exist_ok=True)
 
             # Use current step for chronological ordering
-            filename = f"bbox_step{self.current_step:04d}.png"
+            if label:
+                filename = f"bbox_step{self.current_step:04d}_{label}.png"
+            else:
+                filename = f"bbox_step{self.current_step:04d}.png"
             filepath = os.path.join(img_folder, filename)
 
             # Convert RGB to BGR for cv2 saving (cv2 expects BGR)
