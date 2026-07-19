@@ -169,22 +169,28 @@ class VLMReasoningAgentV4(VLMReasoningAgent):
                 })
             self._messages.append({"role": "user", "content": hist_content})
 
-        # Call model
-        self._log_messages()
-        output = self.model.generate(
-            messages=self._messages,
-            max_new_tokens=2048,
-            temperature=0.0,
-            label="V4",
-            extra_body={"enable_thinking": False},
-        )
-        self._messages.append({"role": "assistant", "content": output})
-        log_response("--RESP")
-        log_response(output)
+        # Call model with retry on parse failure
+        for _attempt in range(5):
+            self._log_messages()
+            output = self.model.generate(
+                messages=self._messages,
+                max_new_tokens=2048,
+                temperature=0.0,
+                label="V4",
+                extra_body={"enable_thinking": False},
+            )
+            self._messages.append({"role": "assistant", "content": output})
+            log_response("--RESP")
+            log_response(output)
 
-        # Strict parse — no retries, no fallback
-        plan, frame_idx, bbox_px = self._parse_response(output, w, h)
-        return plan, frame_idx, bbox_px
+            try:
+                plan, frame_idx, bbox_px = self._parse_response(output, w, h)
+                return plan, frame_idx, bbox_px
+            except RuntimeError as e:
+                from habitat import logger
+                logger.info(f"V4 parse retry {_attempt + 1}/5: {e}")
+
+        raise RuntimeError(f"V4 parse failed after 5 retries")
 
     def _parse_response(self, output: str, w: int, h: int):
         """Strict one-shot parse of the model response.

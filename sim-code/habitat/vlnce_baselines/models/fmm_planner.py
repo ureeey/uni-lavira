@@ -30,7 +30,7 @@ class FMMPlanner:
         
     def set_goal(self, goal: np.ndarray) -> None:
         traversible_ma = ma.masked_values(self.traversible * 1, 0)
-        goal_x, goal_y = goal
+        goal_x, goal_y = int(goal[0]), int(goal[1])
 
         traversible_ma[goal_x, goal_y] = 0
         dd = skfmm.distance(traversible_ma, dx=1)

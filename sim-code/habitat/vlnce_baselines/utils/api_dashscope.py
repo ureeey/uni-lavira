@@ -128,6 +128,8 @@ class LaViRA_DashScope_API:
 
         # Point the SDK at our chosen endpoint before making any calls
         dashscope.base_http_api_url = self._base_url
+        if 'DASHSCOPE_HTTP_TIMEOUT' not in os.environ:
+            os.environ['DASHSCOPE_HTTP_TIMEOUT'] = '30'
 
         logger.info(f"[DashScope native] LA={self.la_model_name}  VA={self.va_model_name}")
         logger.info(f"[DashScope native] base_url={self._base_url}")

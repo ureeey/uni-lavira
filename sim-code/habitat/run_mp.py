@@ -598,7 +598,7 @@ if __name__ == "__main__":
     # --api-format / --dashscope-maas may appear after REMAINDER opts;
     # scan opts to extract them so config merge doesn't choke.
     _bool_flags = {'--dashscope-maas', '--rollout-v2', '--rollout-v3', '--rollout-v4'}
-    _val_flags  = {'--api-format'}
+    _val_flags  = {'--api-format', '--debug-episodes'}
     if args.opts:
         i = 0
         while i < len(args.opts):
