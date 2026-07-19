@@ -98,7 +98,7 @@ def _is_rxr_dataset(cfg) -> bool:
     return False
 
 def run_exp(exp_name: str, exp_config: str,
-            run_type: str, nprocesses: int, opts=None, use_navdp: bool = False, use_fmm: bool = True, debug_episodes: str = None, episode_file: str = None, resume_from_log: str = None, api_format: str = None, dashscope_maas: bool = False, rollout_v2: bool = False, rollout_v3: bool = False) -> None:
+            run_type: str, nprocesses: int, opts=None, use_navdp: bool = False, use_fmm: bool = True, debug_episodes: str = None, episode_file: str = None, resume_from_log: str = None, api_format: str = None, dashscope_maas: bool = False, rollout_v2: bool = False, rollout_v3: bool = False, rollout_v4: bool = False) -> None:
     r"""Runs experiment given mode and config
 
     Args:
@@ -140,6 +140,7 @@ def run_exp(exp_name: str, exp_config: str,
 
     config.ROLLOUT_V2 = rollout_v2
     config.ROLLOUT_V3 = rollout_v3
+    config.ROLLOUT_V4 = rollout_v4
 
     config.freeze()
 
@@ -582,6 +583,12 @@ if __name__ == "__main__":
         help="Use rollout_v3 (experimental) instead of the default rollout loop.",
     )
     parser.add_argument(
+        "--rollout-v4",
+        action="store_true",
+        default=False,
+        help="Use rollout_v4 (experimental) instead of the default rollout loop.",
+    )
+    parser.add_argument(
         "opts",
         default=None,
         nargs=argparse.REMAINDER,
@@ -590,7 +597,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     # --api-format / --dashscope-maas may appear after REMAINDER opts;
     # scan opts to extract them so config merge doesn't choke.
-    _bool_flags = {'--dashscope-maas', '--rollout-v2', '--rollout-v3'}
+    _bool_flags = {'--dashscope-maas', '--rollout-v2', '--rollout-v3', '--rollout-v4'}
     _val_flags  = {'--api-format'}
     if args.opts:
         i = 0

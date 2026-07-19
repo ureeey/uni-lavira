@@ -69,6 +69,7 @@ warnings.filterwarnings('ignore')
 from .agent import VLMReasoningAgent
 from .agent_v2 import VLMReasoningAgentV2
 from .agent_v3 import VLMReasoningAgentV3
+from .agent_v4 import VLMReasoningAgentV4
 
 # Logging — three-layer: evaluator/agent/api (see utils/logging.py)
 from .utils.logging import (  # noqa: F401
@@ -186,6 +187,17 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             backtrack_second_chance=False,
         )
         self.agent_v3 = VLMReasoningAgentV3(
+            self.visualizer,
+            task_type=self.task_type,
+            use_guideline=False,
+            use_working_memory=False,
+            allow_move_behind=False,
+            debug_logging=debug_logging,
+            log_dir=debug_log_dir,
+            use_todo_list=False,
+            backtrack_second_chance=False,
+        )
+        self.agent_v4 = VLMReasoningAgentV4(
             self.visualizer,
             task_type=self.task_type,
             use_guideline=False,
@@ -918,6 +930,8 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
         """
         Execute a whole episode using bounding box target navigation
         """
+        if getattr(self.config, 'ROLLOUT_V4', False):
+            return self.rollout_v4()
         if getattr(self.config, 'ROLLOUT_V3', False):
             return self.rollout_v3()
         if getattr(self.config, 'ROLLOUT_V2', False):
@@ -2508,10 +2522,10 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                         frame = four_views[frame_idx]['rgb']
                         bbox = self._v3_bbox_dict(reg['bbox'])
                         ann_stop = self.visualizer._save_rgb_with_bbox(
-                            frame, bbox, label=f"{_DIRS.get(frame_idx)}_stop")
+                            frame, bbox, label=f"stop_{_DIRS.get(frame_idx)}")
                         if ann_stop is not None:
                             self.bbox_history_images.append(ann_stop)
-                            self._bbox_history_labels.append(f"{_DIRS.get(frame_idx)}_stop")
+                            self._bbox_history_labels.append(f"stop_{_DIRS.get(frame_idx)}")
                         action_list.append(HabitatSimActions.STOP)
 
                     elif plan == "APPROACH":
@@ -2521,10 +2535,10 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                         frame = four_views[frame_idx]
                         bbox = self._v3_bbox_dict(reg['bbox'])
                         ann_appr = self.visualizer._save_rgb_with_bbox(
-                            frame['rgb'], bbox, label=f"{_DIRS.get(frame_idx)}_appr")
+                            frame['rgb'], bbox, label=f"approach_{_DIRS.get(frame_idx)}")
                         if ann_appr is not None:
                             self.bbox_history_images.append(ann_appr)
-                            self._bbox_history_labels.append(f"{_DIRS.get(frame_idx)}_appr")
+                            self._bbox_history_labels.append(f"approach_{_DIRS.get(frame_idx)}")
                         target_map_x, target_map_y = self._v3_bbox_to_target(
                             frame['depth'], frame['sensor_pose'], reg['bbox'],
                         )
@@ -2666,6 +2680,249 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             action_step += 1
 
         self._v3_save_bbox_history(step)
+        self._calculate_metric(infos, is_timeout=True)
+
+    # ==================================================================
+    # rollout_v4 — single-call decide with 4-directional views + FMM
+    # (merged judge + select_one)
+    # ==================================================================
+
+    def rollout_v4(self):
+        """V4 rollout: collect 4-directional views, single VLM decide call, FMM nav."""
+
+        # ------------------------------------------------------------------
+        # 1. INITIALIZATION
+        # ------------------------------------------------------------------
+        obs, full_pose = self._maps_initialization()
+
+        # Check allowed episodes (same as v1/v2/v3)
+        if getattr(self, 'allowed_episodes', None) is not None:
+            current_ep = self.envs.current_episodes()[0]
+            is_allowed = False
+            for allowed_id, allowed_scene_id in self.allowed_episodes:
+                if str(current_ep.episode_id) == allowed_id:
+                    if current_ep.scene_id.endswith(allowed_scene_id) or \
+                       os.path.basename(current_ep.scene_id) == os.path.basename(allowed_scene_id):
+                        is_allowed = True
+                        break
+            if not is_allowed:
+                ep_info = f"{current_ep.episode_id} ({os.path.basename(current_ep.scene_id)})"
+                logger.info(f"Skipping episode {ep_info} (Not in assignment)")
+                return
+
+        dones = [False] * self.config.NUM_ENVIRONMENTS
+        infos = [{}] * self.config.NUM_ENVIRONMENTS
+
+        self._action = None
+        action_list = []
+        collided = 0
+        current_pose = full_pose[0] if full_pose is not None else None
+        prev_pose = None
+        last_decide_pose = None
+        self.bbox_history_images = []
+
+        target_map_x, target_map_y = None, None
+        target_set_step = None
+        max_steps_to_target = 15
+
+        full_map = self.mapping_module.get_full_map()
+        step = 0
+        action_step = 0
+
+        while step < self.max_step:
+            if dones[0]:
+                if LOG_PROGRESS_BAR:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                self._calculate_metric(infos)
+                return
+
+            pos = self.envs.call_at(0, '_env')._sim.get_agent_state().position
+            self.pos_list.append(pos)
+
+            self.visualizer.instruction = self.instruction
+            self.visualizer.destination = self.destination
+            self.visualizer._action = self._action
+
+            if LOG_PROGRESS_BAR:
+                bar_width = 30
+                filled = int(bar_width * min(step / 500, 1.0))
+                bar = "█" * filled + "░" * (bar_width - filled)
+                sys.stdout.write(f"\r  ep{self.current_episode_id}  [{bar}]  step {step}/500")
+                sys.stdout.flush()
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+
+            self.visualizer._save_depth(obs[0]['depth'], step, use_colormap=False)
+            self.visualizer._save_rgb_frame(
+                obs[0], step, getattr(self, 'visited_targets', None),
+                self.current_episode_id,
+                (target_map_x, target_map_y),
+            )
+
+            current_pose = full_pose[0]
+            self.current_step = step
+            self.visualizer.sync(step, self.current_episode_id)
+
+            position = current_pose[:2] * 100 / self.resolution
+            agent_map_x = int(position[1])
+            agent_map_y = int(position[0])
+
+            # ==============================================================
+            # DECIDE
+            # ==============================================================
+            if not action_list:
+                # Target timeout check
+                if target_map_x is not None and target_set_step is not None:
+                    if step - target_set_step >= max_steps_to_target:
+                        log_plan("-PLAN target timeout(step count) -> reset")
+                        target_map_x, target_map_y = None, None
+                        target_set_step = None
+
+                # Distance-to-target check
+                if target_map_x is not None and target_map_y is not None:
+                    dist = np.sqrt((target_map_x - agent_map_x) ** 2 +
+                                   (target_map_y - agent_map_y) ** 2)
+                    if dist < self.target_reached_threshold:
+                        log_plan(f"-PLAN target reached (dist={dist * self.resolution / 100:.2f}m) -> reset")
+                        target_map_x, target_map_y = None, None
+                        target_set_step = None
+
+                if target_map_x is not None and target_map_y is not None:
+                    pass
+                else:
+                    # Collect 4-directional views
+                    four_views, obs, step = self._v3_collect_four_views(obs, step)
+                    if four_views is None:
+                        self._calculate_metric(infos)
+                        return
+
+                    self.visualizer.sync(step, self.current_episode_id)
+                    self.current_step = step
+
+                    came_from = self._v3_came_from_direction(last_decide_pose, four_views)
+                    _DIRS = {0: "front", 1: "right", 2: "back", 3: "left"}
+                    came_from_str = _DIRS.get(came_from, str(came_from)) if came_from is not None else "None"
+
+                    log_plan(f"-PLAN agent.decide (step={step}, came_from={came_from_str}, history={len(self.bbox_history_images)})")
+
+                    plan, frame_idx, bbox_px = self.agent_v4.decide(
+                        self.instruction,
+                        [v['rgb'] for v in four_views],
+                        came_from,
+                        self.bbox_history_images if self.bbox_history_images else None,
+                    )
+
+                    log_plan(f"-PLAN: {plan} frame={frame_idx} bbox={bbox_px}")
+
+                    if plan == "STOP":
+                        frame = four_views[frame_idx]['rgb']
+                        bbox = self._v3_bbox_dict(bbox_px)
+                        ann = self.visualizer._save_rgb_with_bbox(
+                            frame, bbox, label=f"stop_{_DIRS.get(frame_idx)}")
+                        if ann is not None:
+                            self.bbox_history_images.append(ann)
+                        action_list.append(HabitatSimActions.STOP)
+
+                    elif plan == "APPROACH":
+                        frame = four_views[frame_idx]
+                        bbox = self._v3_bbox_dict(bbox_px)
+                        ann = self.visualizer._save_rgb_with_bbox(
+                            frame['rgb'], bbox, label=f"approach_{_DIRS.get(frame_idx)}")
+                        if ann is not None:
+                            self.bbox_history_images.append(ann)
+                        target_map_x, target_map_y = self._v3_bbox_to_target(
+                            frame['depth'], frame['sensor_pose'], bbox_px,
+                        )
+                        target_set_step = step
+                        last_decide_pose = four_views[0]['sensor_pose'].copy()
+
+                    elif plan == "EXPLORE":
+                        frame = four_views[frame_idx]
+                        bbox = self._v3_bbox_dict(bbox_px)
+                        ann = self.visualizer._save_rgb_with_bbox(
+                            frame['rgb'], bbox, label=f"explore_{_DIRS.get(frame_idx)}")
+                        if ann is not None:
+                            self.bbox_history_images.append(ann)
+                        target_map_x, target_map_y = self._v3_bbox_to_target(
+                            frame['depth'], frame['sensor_pose'], bbox_px,
+                        )
+                        target_set_step = step
+                        last_decide_pose = four_views[0]['sensor_pose'].copy()
+
+                    elif plan == "OTHER":
+                        log_plan("-PLAN fail")
+                        self._calculate_metric(infos)
+                        return
+
+            # ==============================================================
+            # FMM NAVIGATION
+            # ==============================================================
+            if target_map_x is not None and target_map_y is not None:
+                waypoint = np.array([target_map_y, target_map_x])
+                navigation_action = self.policy._get_action(
+                    current_pose, waypoint, full_map[0], self.traversable,
+                    self.collision_map, step, self.current_episode_id,
+                    self.detected_classes, False,
+                )
+                action_list.append(navigation_action)
+                log_fmm(f"---FMM step={step} action={_action_name(navigation_action)}")
+
+            # ==============================================================
+            # ACT
+            # ==============================================================
+            if action_list:
+                self._action = action_list.pop(0)
+                actions = [{"action": self._action}]
+
+                log_act(f"----ACT step={step} execute action={_action_name(self._action)} pos=({current_pose[0]:.3f},{current_pose[1]:.3f}) heading={current_pose[2]:.1f}deg")
+
+                outputs = self.envs.step(actions)
+                step += 1
+
+                obs, _, dones, infos = [list(x) for x in zip(*outputs)]
+
+                if not dones[0]:
+                    batch_obs = self._batch_obs(obs)
+                    poses = torch.from_numpy(np.array([item['sensor_pose'] for item in obs])).float().to(self.device)
+                    self.mapping_module(batch_obs, poses, self.current_step)
+                    full_map, full_pose, one_step_full_map = \
+                        self.mapping_module.update_map(step, self.detected_classes, self.current_episode_id)
+                    self.mapping_module.one_step_full_map.fill_(0.)
+                    self.mapping_module.one_step_local_map.fill_(0.)
+
+                    self.traversable, self.floor, self.frontiers = self._process_map(step, full_map[0])
+                    self.one_step_floor = self._process_one_step_floor(one_step_full_map[0])
+
+                    prev_pose = current_pose
+                    current_pose = full_pose[0]
+
+                    # Collision detection
+                    if prev_pose is not None and current_pose is not None:
+                        displacement = calculate_displacement(prev_pose, current_pose, self.resolution)
+                        if displacement < 0.2 * 100 / self.resolution:
+                            collided += 1
+                        else:
+                            collided = 0
+                        if collided >= 30:
+                            fname = os.path.join(self.config.EVAL_CKPT_PATH_DIR,
+                                                 f"r{self.local_rank}_w{self.world_size}_collision_stuck.txt")
+                            with open(fname, "a") as f:
+                                f.writelines(
+                                    f"id: {str(self.current_episode_id)}; step: {str(step)}; collided: {str(collided)}\n")
+
+                    current_action = self._action
+                    if prev_pose is not None and current_action is not None and current_action == 1:
+                        collision_map = collision_check_fmm(prev_pose, current_pose, self.resolution,
+                                                            self.mapping_module.map_shape)
+                        self.collision_map = np.logical_or(self.collision_map, collision_map)
+                    self.traversable[self.collision_map == 1] = 0
+                else:
+                    self._calculate_metric(infos)
+                    return
+
+            action_step += 1
+
         self._calculate_metric(infos, is_timeout=True)
 
     # ------------------------------------------------------------------
@@ -2939,7 +3196,9 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
 
         # Print final statistics (merge v1 + v2 + v3)
         logger.info("=== FINAL MODEL USAGE STATISTICS ===")
-        if getattr(self.config, 'ROLLOUT_V3', False):
+        if getattr(self.config, 'ROLLOUT_V4', False):
+            final_stats = self.agent_v4.model.print_usage_stats()
+        elif getattr(self.config, 'ROLLOUT_V3', False):
             final_stats = self.agent_v3.model.print_usage_stats()
         elif getattr(self.config, 'ROLLOUT_V2', False):
             final_stats = self.agent_v2.model.print_usage_stats()
@@ -3050,7 +3309,9 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             except Exception:
                 pass
 
-        if getattr(self.config, 'ROLLOUT_V3', False):
+        if getattr(self.config, 'ROLLOUT_V4', False):
+            final_stats = self.agent_v4.model.print_usage_stats()
+        elif getattr(self.config, 'ROLLOUT_V3', False):
             final_stats = self.agent_v3.model.print_usage_stats()
         elif getattr(self.config, 'ROLLOUT_V2', False):
             final_stats = self.agent_v2.model.print_usage_stats()
