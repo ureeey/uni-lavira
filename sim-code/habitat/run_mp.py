@@ -98,7 +98,7 @@ def _is_rxr_dataset(cfg) -> bool:
     return False
 
 def run_exp(exp_name: str, exp_config: str,
-            run_type: str, nprocesses: int, opts=None, use_navdp: bool = False, use_fmm: bool = True, debug_episodes: str = None, episode_file: str = None, resume_from_log: str = None, api_format: str = None, dashscope_maas: bool = False, rollout_v2: bool = False) -> None:
+            run_type: str, nprocesses: int, opts=None, use_navdp: bool = False, use_fmm: bool = True, debug_episodes: str = None, episode_file: str = None, resume_from_log: str = None, api_format: str = None, dashscope_maas: bool = False, rollout_v2: bool = False, rollout_v3: bool = False) -> None:
     r"""Runs experiment given mode and config
 
     Args:
@@ -139,6 +139,7 @@ def run_exp(exp_name: str, exp_config: str,
     config.USE_FMM = use_fmm
 
     config.ROLLOUT_V2 = rollout_v2
+    config.ROLLOUT_V3 = rollout_v3
 
     config.freeze()
     
@@ -146,9 +147,10 @@ def run_exp(exp_name: str, exp_config: str,
     os.makedirs(config.EVAL_CKPT_PATH_DIR, exist_ok=True)
     os.system("mkdir -p data/logs/running_log")
     logger.add_filehandler('data/logs/running_log/' + config.LOG_FILE)
-    if not int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+    from vlnce_baselines.utils.logging import LOG_PROGRESS_BAR
+    if not LOG_PROGRESS_BAR:
         logger.info(f"hyper parameters:\n{config.EVAL}")
-    
+
     # dataset split, start multi-processes
     gpu_ids = config.TORCH_GPU_IDS
     num_devices = len(gpu_ids)
@@ -323,7 +325,7 @@ def run_exp(exp_name: str, exp_config: str,
             if not alive:
                 break
             elapsed = time.time() - start_time
-            if not int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+            if not LOG_PROGRESS_BAR:
                 logger.info(f"Progress check: {elapsed:.0f}s elapsed, {len(alive)}/{len(procs)} workers still running")
             if elapsed > 36000:  # 10h safety timeout
                 logger.info("Timeout reached, terminating stragglers")
@@ -574,6 +576,12 @@ if __name__ == "__main__":
         help="Use rollout_v2 (experimental) instead of the default rollout loop.",
     )
     parser.add_argument(
+        "--rollout-v3",
+        action="store_true",
+        default=False,
+        help="Use rollout_v3 (experimental) instead of the default rollout loop.",
+    )
+    parser.add_argument(
         "opts",
         default=None,
         nargs=argparse.REMAINDER,
@@ -582,7 +590,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     # --api-format / --dashscope-maas may appear after REMAINDER opts;
     # scan opts to extract them so config merge doesn't choke.
-    _bool_flags = {'--dashscope-maas', '--rollout-v2'}
+    _bool_flags = {'--dashscope-maas', '--rollout-v2', '--rollout-v3'}
     _val_flags  = {'--api-format'}
     if args.opts:
         i = 0

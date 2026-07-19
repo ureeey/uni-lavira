@@ -24,8 +24,8 @@ from .prompts.prompts_objnav_v2 import (
     PROMPT_TARGET_BBOX,
 )
 
-# V2 request logging: 0=off, 1=incremental (new msgs only), 2=full
-_V2_LOG_REQ = int(_os.environ.get("LAVIRA_V2_LOG_REQ", "0"))
+# Request logging: 0=off, 1=incremental (new msgs only), 2=full
+from .utils.logging import LOG_REQ, log_req, log_req_full
 
 
 class VLMReasoningAgentV2(VLMReasoningAgent):
@@ -78,31 +78,31 @@ class VLMReasoningAgentV2(VLMReasoningAgent):
     def _log_messages(self):
         """Print the conversation content for debugging.
 
-        Controlled by LAVIRA_V2_LOG_REQ:
+        Controlled by LAVIRA_LOG_REQ:
           0 = off,  1 = incremental (new messages only),  2 = full.
         """
-        if _V2_LOG_REQ == 0:
+        if LOG_REQ == 0:
             self._req_last_count = len(self._messages)
             return
         from habitat import logger
         total_kb = 0
         last = getattr(self, '_req_last_count', 0)
-        start = 0 if _V2_LOG_REQ >= 2 else last
+        start = 0 if LOG_REQ >= 2 else last
         if start < len(self._messages):
-            logger.info(f"-REQ --- [{start}..{len(self._messages)-1}] ---")
+            logger.info(f"--REQ --- [{start}..{len(self._messages)-1}] ---")
         for i in range(start, len(self._messages)):
             msg = self._messages[i]
             role = msg.get("role", "?")
             content = msg.get("content", "")
             if isinstance(content, str):
-                logger.info(f"-REQ [{i}] {role}: {content[:200]}")
+                logger.info(f"--REQ [{i}] {role}: {content}")
                 total_kb += len(content) / 1024
             elif isinstance(content, list):
                 imgs_kb = 0
                 for item in content:
                     if item.get("type") == "text":
                         t = item["text"]
-                        logger.info(f"-REQ [{i}] {role} text: {t[:200]}")
+                        logger.info(f"--REQ [{i}] {role} text: {t}")
                         total_kb += len(t) / 1024
                     elif item.get("type") == "image_url":
                         url = item["image_url"]["url"]
@@ -110,10 +110,10 @@ class VLMReasoningAgentV2(VLMReasoningAgent):
                         imgs_kb += size_kb
                 total_kb += imgs_kb
                 if imgs_kb > 0:
-                    logger.info(f"-REQ [{i}] {role} image: {imgs_kb:.0f} KB")
+                    logger.info(f"--REQ [{i}] {role} image: {imgs_kb:.0f} KB")
         self._req_last_count = len(self._messages)
         if total_kb > 0:
-            logger.info(f"-REQ --- {total_kb:.0f} KB ---")
+            logger.info(f"--REQ --- {total_kb:.0f} KB ---")
 
     def _call_api_and_parse_yes_no(self):
         """Call the VA API and parse a yes/no answer.  Retries up to 3 times."""
@@ -128,7 +128,7 @@ class VLMReasoningAgentV2(VLMReasoningAgent):
             )
             self._messages.append({"role": "assistant", "content": output})
             self._last_output = output
-            log_response("-RESP")
+            log_response("--RESP")
             log_response(output)
             lower = output.strip().lower()
             if lower.startswith("yes") or "yes" in lower[:10]:
@@ -152,7 +152,7 @@ class VLMReasoningAgentV2(VLMReasoningAgent):
             )
             self._messages.append({"role": "assistant", "content": output})
             self._last_output = output
-            log_response("-RESP")
+            log_response("--RESP")
             log_response(output)
             m = re.search(r"\{.*\}", output, re.DOTALL)
             if m:

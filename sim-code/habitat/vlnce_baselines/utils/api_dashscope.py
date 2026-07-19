@@ -22,11 +22,15 @@ try:
 except ImportError:
     dashscope = None
 
-# ── Logging verbosity (shared env vars with api_openai.py) ────────────
-_LOG_PROMPT_LEVEL = int(os.environ.get("LAVIRA_LOG_PROMPT_OUT", "0"))
-_LOG_VERBOSE = int(os.environ.get("LAVIRA_LOG_VERBOSE", "0"))
-_LOG_NETWORK = int(os.environ.get("LAVIRA_LOG_NETWORK", "0"))
-_LOG_BODY = int(os.environ.get("LAVIRA_LOG_BODY", "0"))
+# ── Logging verbosity (shared with api_openai.py via logging.py) ─────────
+from .logging import (  # noqa: F401  — re-exported for backward compatibility
+    LOG_BODY,
+    LOG_NETWORK,
+    LOG_PROGRESS_BAR,
+    log_body as _log_body,
+    log_network as _log_network,
+    log_plan as _log_verbose,
+)
 
 # ── HTTP-level body logging (intercept requests.Session.send) ────────
 _orig_session_send = None
@@ -48,53 +52,6 @@ def _install_body_interceptor():
         return _orig_session_send(self, request, **kwargs)
 
     requests.Session.send = _patched_send
-
-
-def _log_network(msg: str):
-    if _LOG_NETWORK:
-        logger.info(f"[NET] {msg}")
-
-
-def _log_verbose(msg: str):
-    if _LOG_VERBOSE == 0:
-        logger.info(msg)
-
-
-def _log_body(messages, label=""):
-    """Log the actual message content structure — image format, count, sizes."""
-    if not _LOG_BODY:
-        return
-    img_sources = []
-    total_text_chars = 0
-    for msg in messages:
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            total_text_chars += len(content)
-        elif isinstance(content, list):
-            for item in content:
-                if "text" in item:
-                    total_text_chars += len(item["text"])
-                elif "image" in item:
-                    url = item["image"]
-                    if url.startswith("data:"):
-                        size_kb = len(url) / 1024
-                        img_sources.append(f"base64 ({size_kb:.0f} KB)")
-                    elif url.startswith("oss://"):
-                        img_sources.append(f"oss://  ({len(url):.0f} B)")
-                    elif url.startswith("http"):
-                        img_sources.append(f"http   ({len(url):.0f} B)")
-                    else:
-                        img_sources.append(f"other  ({len(url):.0f} B)")
-
-    total_body_kb = total_text_chars / 1024 + sum(
-        len(item.get("image", "")) / 1024
-        for msg in messages if isinstance(msg.get("content", []), list)
-        for item in msg["content"] if "image" in item
-    )
-
-    summary = ", ".join(img_sources) if img_sources else "no images"
-    logger.info(f"[BODY] {label}  {len(img_sources)} imgs  |  {summary}  |  "
-                f"text: {total_text_chars/1024:.0f} KB  body: {total_body_kb:.0f} KB")
 
 
 class _LatencyEstimator:
@@ -175,7 +132,7 @@ class LaViRA_DashScope_API:
         logger.info(f"[DashScope native] LA={self.la_model_name}  VA={self.va_model_name}")
         logger.info(f"[DashScope native] base_url={self._base_url}")
 
-        if _LOG_BODY:
+        if LOG_BODY:
             _install_body_interceptor()
 
         self.reset_stats()
@@ -396,7 +353,7 @@ class LaViRA_DashScope_API:
 
         _msg_str = json.dumps(messages, ensure_ascii=False)
         _payload_kb = len(_msg_str.encode('utf-8')) / 1024
-        if _LOG_VERBOSE:
+        if LOG_PROGRESS_BAR:
             sys.stdout.write("\n")
             sys.stdout.flush()
 

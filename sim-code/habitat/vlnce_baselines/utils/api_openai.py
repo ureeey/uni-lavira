@@ -28,78 +28,18 @@ def _getaddrinfo_ipv4(host, port, family=0, type=0, proto=0, flags=0):
 
 socket.getaddrinfo = _getaddrinfo_ipv4
 
-# ── Logging verbosity controls (set via environment variables) ──────────────
-# LAVIRA_LOG_PROMPT_OUT: 0 = full (default), 1 = skip prompt templates, 2 = mute all
-# LAVIRA_LOG_VERBOSE: 0 = full (default), 1 = quiet (no ChatCompletion dumps, etc.)
-_LOG_PROMPT_LEVEL = int(os.environ.get("LAVIRA_LOG_PROMPT_OUT", "0"))
-_LOG_VERBOSE = int(os.environ.get("LAVIRA_LOG_VERBOSE", "0"))
-_LOG_NETWORK = int(os.environ.get("LAVIRA_LOG_NETWORK", "0"))
-_LOG_BODY = int(os.environ.get("LAVIRA_LOG_BODY", "0"))
-
-
-def log_network(msg: str):
-    """Log network diagnostics — controlled by LAVIRA_LOG_NETWORK."""
-    if _LOG_NETWORK:
-        logger.info(f"[NET] {msg}")
-
-
-def _log_body(messages, label=""):
-    """Log the actual message content structure — image format, count, sizes."""
-    if not _LOG_BODY:
-        return
-    img_sources = []
-    total_text_chars = 0
-    for msg in messages:
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            total_text_chars += len(content)
-        elif isinstance(content, list):
-            for item in content:
-                if item.get("type") == "text":
-                    total_text_chars += len(item["text"])
-                elif item.get("type") == "image_url":
-                    url = item["image_url"]["url"]
-                    if url.startswith("data:"):
-                        size_kb = len(url) / 1024
-                        img_sources.append(f"base64 ({size_kb:.0f} KB)")
-                    elif url.startswith("oss://"):
-                        img_sources.append(f"oss://  ({len(url):.0f} B)")
-                    elif url.startswith("http"):
-                        img_sources.append(f"http   ({len(url):.0f} B)")
-                    else:
-                        img_sources.append(f"other  ({len(url):.0f} B)")
-
-    total_body_kb = total_text_chars / 1024 + sum(
-        len(item.get("image_url", {}).get("url", "")) / 1024
-        for msg in messages if isinstance(msg.get("content", []), list)
-        for item in msg["content"] if item.get("type") == "image_url"
-    )
-
-    summary = ", ".join(img_sources) if img_sources else "no images"
-    logger.info(f"[BODY] {label}  {len(img_sources)} imgs  |  {summary}  |  "
-                f"text: {total_text_chars/1024:.0f} KB  body: {total_body_kb:.0f} KB")
-
-
-def log_prompt(msg: str):
-    """Log a prompt template — controlled by LAVIRA_LOG_PROMPT_OUT."""
-    if _LOG_PROMPT_LEVEL == 0:
-        logger.info(msg)
-    elif _LOG_PROMPT_LEVEL == 1:
-        pass  # skip templates
-    # level 2: skip silently
-
-
-def log_response(msg: str):
-    """Log a model response — controlled by LAVIRA_LOG_PROMPT_OUT."""
-    if _LOG_PROMPT_LEVEL <= 1:
-        logger.info(msg)
-    # level 2: skip silently
-
-
-def log_verbose(msg: str):
-    """Log optional detail — controlled by LAVIRA_LOG_VERBOSE."""
-    if _LOG_VERBOSE == 0:
-        logger.info(msg)
+# ── Logging verbosity controls ───────────────────────────────────────────────
+# Delegated to vlnce_baselines.utils.logging (three-layer: evaluator / agent / api).
+from .logging import (  # noqa: F401  — re-exported for backward compatibility
+    LOG_BODY,
+    LOG_NETWORK,
+    LOG_PROGRESS_BAR,
+    log_body,
+    log_network,
+    log_req as log_prompt,
+    log_resp as log_response,
+    log_plan as log_verbose,   # log_plan replaces the old log_verbose
+)
 
 
 def _clear_proxy_env():
@@ -129,7 +69,7 @@ def _build_http_client():
     When enabled, the hooks log every HTTP request/response pair so slow
     requests can be pinpointed (DNS, TCP, TLS, or server-side wait).
     """
-    if not (_LOG_NETWORK or _LOG_BODY) or httpx is None:
+    if not (LOG_NETWORK or LOG_BODY) or httpx is None:
         return None
 
     _req_start = {}
@@ -138,7 +78,7 @@ def _build_http_client():
         _req_start[id(request)] = time.time()
         _payload = len(request.content) if request.content else 0
         log_network(f"HTTP → {request.method} {request.url}  ({_payload / 1024:.0f} KB)")
-        if _LOG_BODY:
+        if LOG_BODY:
             ct = request.headers.get('content-type', '?')
             logger.info(f"[BODY HTTP] {request.method} {request.url}  "
                         f"body={_payload/1024:.0f} KB  content-type={ct}")
@@ -377,9 +317,9 @@ class LaViRA_OpenAI_API:
         else:
             self._va_round += 1
             label = f"VA #{self._va_round}"
-        # When the progress bar is active (VERBOSE=1), its \r leaves the cursor
+        # When the progress bar is active (quiet mode), its \r leaves the cursor
         # mid-line.  Emit a newline so subsequent output starts on a clean line.
-        if _LOG_VERBOSE:
+        if LOG_PROGRESS_BAR:
             sys.stdout.write("\n")
             sys.stdout.flush()
 
@@ -391,7 +331,7 @@ class LaViRA_OpenAI_API:
         logger.info(f"▐ {label} → {model_name}  {_payload_kb:.0f} KB")
 
         try:
-            _log_body(messages, f"{label} OpenAI msg format")
+            log_body(messages, f"{label} OpenAI msg format")
             _call_t = time.time()
             if stats_key == 'Language Action Model':
                 response = client.chat.completions.create(

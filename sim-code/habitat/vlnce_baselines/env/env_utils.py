@@ -148,7 +148,8 @@ def construct_envs(
             task_config.SIMULATOR.AGENT_0.SENSORS = config.SENSORS
 
             # Debug logging for config
-            if not int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+            from vlnce_baselines.utils.logging import LOG_PROGRESS_BAR
+            if not LOG_PROGRESS_BAR:
                 logger.info(f"Proc {proc_id} Config Check:")
                 logger.info(f"  DATA_PATH: {task_config.DATASET.DATA_PATH}")
                 logger.info(f"  CONTENT_SCENES: {task_config.DATASET.CONTENT_SCENES}")
