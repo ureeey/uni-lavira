@@ -310,7 +310,7 @@ class LaViRAVisualizer:
             logger.info(f"Error saving depth: {e}")
             return None
 
-    def _create_combined_image(self, rgb_image, metadata, step, visited_targets, target_coords=None, reasoning_info=None, todo_list=None, navdp_traj=None, la_output=None):
+    def _create_combined_image(self, rgb_image, metadata, step, visited_targets, target_coords=None, reasoning_info=None, todo_list=None, navdp_traj=None, la_output=None, hollow_robot=False, bbox_image=None, bbox_plan=None):
         """Create a combined image with RGB on left, VLM map on right, instruction text, and reasoning info
 
         Args:
@@ -336,7 +336,7 @@ class LaViRAVisualizer:
         vlm_map = self.mapping_module.create_vlm_map_from_state(
             self.current_episode_id, 0, goal_tensor,
             output_size=(1024, 1024), visited_targets=visited_targets, display_last=True,
-            navdp_traj=navdp_traj
+            navdp_traj=navdp_traj, hollow_robot=hollow_robot
         ).copy()
 
         debug_map_path = os.path.join(self.save_dir, str(self.current_episode_id), f'debug_vlm_map_step{step:04d}.png')
@@ -572,58 +572,6 @@ class LaViRAVisualizer:
                 )
             y_pos += line_height
 
-        # Add reasoning and progress analysis information if available
-        if reasoning_info:
-            y_pos += 5  # Add some spacing
-
-            # 1. LA Action / Decision (REMOVED as requested, moved to Instruction line)
-            
-            # Draw progress analysis (REMOVED as requested)
-            
-            # Draw reasoning (REMOVED as requested)
-
-        # Draw TODO List if available
-        if todo_list:
-            y_pos += 5  # Add some spacing
-            cv2.putText(
-                white_bg,
-                "TODO List: ",
-                (15, y_pos),
-                font,
-                0.5,  # Slightly smaller font
-                (255, 140, 0),  # Dark Orange
-                1,
-                lineType=cv2.LINE_AA
-            )
-            y_pos += line_height
-
-            # Split TODO list into lines
-            todo_lines = todo_list.split('\n')
-            for line in todo_lines:
-                line = line.strip()
-                if not line:
-                    continue
-                
-                # Check for completion status
-                is_completed = '- [x]' in line or '- [X]' in line
-                color = (100, 100, 100) if is_completed else (0, 0, 0) # Gray if done, Black if todo
-                
-                # Wrap long lines
-                wrapped_todo = wrap_text(line, max_text_width - 60, font, 0.5, 1)
-                for wrapped_line in wrapped_todo:
-                    if y_pos < instruction_height - 15:
-                        cv2.putText(
-                            white_bg,
-                            wrapped_line,
-                            (30, y_pos),
-                            font,
-                            0.5,
-                            color,
-                            1,
-                            lineType=cv2.LINE_AA
-                        )
-                        y_pos += 18
-
         # Create header for the two panels
         header_height = 25
         header_bg = np.ones((header_height, frame.shape[1], 3), dtype=np.uint8) * 240
@@ -634,7 +582,6 @@ class LaViRAVisualizer:
         headers = ["RGB View", "VLM Navigation Map"]
         header_colors = [(0, 100, 0), (0, 0, 139)]  # Dark green, Dark red
 
-        # Position headers in center of each panel
         x_positions = [
             rgb_width // 2,  # RGB center
             rgb_width + vlm_width // 2  # VLM map center
@@ -643,24 +590,97 @@ class LaViRAVisualizer:
         for i, (header, color, x_pos) in enumerate(zip(headers, header_colors, x_positions)):
             text_size = cv2.getTextSize(header, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
             x_centered = max(0, x_pos - text_size[0] // 2)
+            cv2.putText(header_bg, header, (x_centered, 18),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, lineType=cv2.LINE_AA)
 
-            cv2.putText(
-                header_bg,
-                header,
-                (x_centered, 18),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                color,
-                2,
-                lineType=cv2.LINE_AA
-            )
+        # Add bbox image if provided (V4), otherwise render reasoning/todo (V1)
+        if bbox_image is not None:
+            if isinstance(bbox_image, str):
+                # Placeholder text (e.g. "环视中" during panorama), centered in remaining space
+                remaining_h = instruction_height - y_pos
+                cx = frame.shape[1] // 2
+                cy = y_pos + remaining_h // 2
+                (tw, th), _ = cv2.getTextSize(bbox_image, font, 1.2, 2)
+                cv2.putText(white_bg, bbox_image, (cx - tw // 2, cy + th // 2),
+                            font, 1.2, (150, 150, 150), 2, lineType=cv2.LINE_AA)
+            else:
+                # Scale bbox image to fit remaining white_bg space, keep aspect ratio
+                remaining_h = instruction_height - y_pos - 10
+                bbox_h, bbox_w = bbox_image.shape[:2]
+                scale = min(frame.shape[1] / bbox_w, remaining_h / bbox_h)
+                target_w = int(bbox_w * scale)
+                target_h = int(bbox_h * scale)
+                bbox_resized = cv2.resize(bbox_image, (target_w, target_h))
+                # Center horizontally
+                x_off = (frame.shape[1] - target_w) // 2
+                y_off = y_pos + 5
+                if y_off + target_h <= instruction_height:
+                    white_bg[y_off:y_off + target_h, x_off:x_off + target_w] = bbox_resized
+                    # Overlay bbox type label (STOP/APPROACH/EXPLORE) top-right corner
+                    if bbox_plan:
+                        (lw, lh), _ = cv2.getTextSize(bbox_plan, font, 0.6, 2)
+                        lx = x_off + target_w - lw - 8
+                        ly = y_off + lh + 6
+                        cv2.rectangle(white_bg, (lx - 4, y_off + 2), (x_off + target_w - 2, ly + 4), (0, 0, 0), -1)
+                        cv2.putText(white_bg, bbox_plan, (lx, ly), font, 0.6, (255, 255, 255), 2, lineType=cv2.LINE_AA)
+            final_frame = np.concatenate([header_bg, frame, white_bg], axis=0)
+        else:
+            # Original V1 path: reasoning info + TODO list
+            # Add reasoning and progress analysis information if available
+            if reasoning_info:
+                y_pos += 5  # Add some spacing
+                # 1. LA Action / Decision (REMOVED as requested, moved to Instruction line)
+                # Draw progress analysis (REMOVED as requested)
+                # Draw reasoning (REMOVED as requested)
 
-        # Combine all components: header + main frame + instruction area
-        final_frame = np.concatenate([header_bg, frame, white_bg], axis=0)
+            # Draw TODO List if available
+            if todo_list:
+                y_pos += 5  # Add some spacing
+                cv2.putText(
+                    white_bg,
+                    "TODO List: ",
+                    (15, y_pos),
+                    font,
+                    0.5,  # Slightly smaller font
+                    (255, 140, 0),  # Dark Orange
+                    1,
+                    lineType=cv2.LINE_AA
+                )
+                y_pos += line_height
+
+                # Split TODO list into lines
+                todo_lines = todo_list.split('\n')
+                for line in todo_lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    # Check for completion status
+                    is_completed = '- [x]' in line or '- [X]' in line
+                    color = (100, 100, 100) if is_completed else (0, 0, 0) # Gray if done, Black if todo
+
+                    # Wrap long lines
+                    wrapped_todo = wrap_text(line, max_text_width - 60, font, 0.5, 1)
+                    for wrapped_line in wrapped_todo:
+                        if y_pos < instruction_height - 15:
+                            cv2.putText(
+                                white_bg,
+                                wrapped_line,
+                                (30, y_pos),
+                                font,
+                                0.5,
+                                color,
+                                1,
+                                lineType=cv2.LINE_AA
+                            )
+                            y_pos += 18
+
+            # Combine all components: header + main frame + instruction area
+            final_frame = np.concatenate([header_bg, frame, white_bg], axis=0)
 
         return Image.fromarray(final_frame.astype(np.uint8))
 
-    def _save_rgb_frame(self, obs: Observations, step: int, visited_targets, episode_id: str = None, target_coords: tuple = None, todo_list: str = None, navdp_traj: list = None, la_output: dict = None):
+    def _save_rgb_frame(self, obs: Observations, step: int, visited_targets, episode_id: str = None, target_coords: tuple = None, todo_list: str = None, navdp_traj: list = None, la_output: dict = None, hollow_robot: bool = False, bbox_image=None, bbox_plan=None):
         """Save RGB frame with metadata, instruction text and top-down map"""
         if not self.visualize:
             return
@@ -683,7 +703,7 @@ class LaViRAVisualizer:
 
         # logger.info(target_coords)
         # Create combined image with RGB, top-down map, and value map heatmap
-        combined_image = self._create_combined_image(rgb_image, metadata, step, visited_targets, target_coords, todo_list=todo_list, navdp_traj=navdp_traj, la_output=la_output)
+        combined_image = self._create_combined_image(rgb_image, metadata, step, visited_targets, target_coords, todo_list=todo_list, navdp_traj=navdp_traj, la_output=la_output, hollow_robot=hollow_robot, bbox_image=bbox_image, bbox_plan=bbox_plan)
 
         img_folder = os.path.join(self.save_dir, episode_id)
         img_path = os.path.join(img_folder, f"combined_step{step:04d}.png")

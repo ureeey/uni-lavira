@@ -24,12 +24,12 @@ export __GLX_VENDOR_LIBRARY_NAME=nvidia
 #   LAVIRA_LOG=normal   prompts + decisions (suitable for daily eval)
 #   LAVIRA_LOG=debug    everything including network, body, FMM, full request history
 export LAVIRA_LOG=normal
-export LAVIRA_LOG_REQ=1
-export LAVIRA_LOG_RESP=1
+export LAVIRA_LOG_REQ=0
+export LAVIRA_LOG_RESP=0
 export LAVIRA_LOG_PLAN=1
-export LAVIRA_LOG_FMM=0
+export LAVIRA_LOG_FMM=1
 export LAVIRA_LOG_ACT=0
-export LAVIRA_LOG_BODY=1
+export LAVIRA_LOG_BODY=0
 export LAVIRA_LOG_NETWORK=0
 # Per-category overrides (take precedence over the preset):
 #

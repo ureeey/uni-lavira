@@ -480,7 +480,8 @@ class Semantic_Mapping(nn.Module):
         output_size: tuple = (1024, 1024),
         visited_targets: list = None,
         display_last: bool = False,  # whether to include the last visited target
-        navdp_traj: list = None   # List of (x, y) tuples in world coordinates (meters)
+        navdp_traj: list = None,  # List of (x, y) tuples in world coordinates (meters)
+        hollow_robot: bool = False,  # draw robot center circle as hollow (panorama)
     ) -> np.ndarray:
         """
         Build a coordinate-accurate, high-contrast, simplified 2D map image for the
@@ -645,7 +646,10 @@ class Semantic_Mapping(nn.Module):
         # Create points array with proper dtype for fillPoly
         arrow_points = np.array([[p_tip, p_left, p_right]], dtype=np.int32)
         cv2.fillPoly(vis_map, arrow_points, COLOR_AGENT)
-        cv2.circle(vis_map, p_center, 8, (0, 0, 255), -1)  # red center dot
+        if hollow_robot:
+            cv2.circle(vis_map, p_center, 8, (0, 0, 255), 2)   # hollow during panorama
+        else:
+            cv2.circle(vis_map, p_center, 8, (0, 0, 255), -1)  # filled red center dot
 
         if visited_targets is not None and len(visited_targets) > 0:
             # logger.info(f"Drawing {len(visited_targets)} visited targets on map")
@@ -675,7 +679,7 @@ class Semantic_Mapping(nn.Module):
 
                         if 0 <= target_local_x < w and 0 <= target_local_y < h:
                             # Draw historical target as a small filled circle, no label here.
-                            cv2.circle(vis_map, (target_local_y, target_local_x), 6, COLOR_VISITED_TARGET, -1)
+                            cv2.circle(vis_map, (target_local_y, target_local_x), 3, COLOR_VISITED_TARGET, -1)
                             # cv2.circle(vis_map, (target_local_y, target_local_x), 8, (255, 255, 255), 2)  # white border
 
                             # Cache target position so labels can be drawn after upscaling.

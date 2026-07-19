@@ -35,6 +35,7 @@ from vlnce_baselines.utils.map_utils import *
 from vlnce_baselines.utils.data_utils import OrderedSet
 from vlnce_baselines.map.mapping import Semantic_Mapping
 from vlnce_baselines.models.Policy import FusionMapPolicy
+from vlnce_baselines.models.fmm_planner import FMMPlanner
 from vlnce_baselines.env.env_utils import construct_envs
 from vlnce_baselines.utils.misc import get_device
 from vlnce_baselines.map.semantic_prediction import GroundedSAM
@@ -2720,10 +2721,15 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
         prev_pose = None
         last_decide_pose = None
         self.bbox_history_images = []
+        self.current_bbox_image = "scanning"
+        self.current_bbox_plan = None
 
         target_map_x, target_map_y = None, None
         target_set_step = None
-        max_steps_to_target = 15
+        target_original_d = None  # FMM geodesic distance when target was set
+        max_steps_to_target = 15  # will be set dynamically per target
+        best_fmm = None  # best FMM distance achieved in current NAV cycle
+        stuck_counter = 0
 
         full_map = self.mapping_module.get_full_map()
         step = 0
@@ -2754,11 +2760,6 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                 sys.stdout.flush()
 
             self.visualizer._save_depth(obs[0]['depth'], step, use_colormap=False)
-            self.visualizer._save_rgb_frame(
-                obs[0], step, getattr(self, 'visited_targets', None),
-                self.current_episode_id,
-                (target_map_x, target_map_y),
-            )
 
             current_pose = full_pose[0]
             self.current_step = step
@@ -2775,23 +2776,46 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                 # Target timeout check
                 if target_map_x is not None and target_set_step is not None:
                     if step - target_set_step >= max_steps_to_target:
-                        log_plan("-PLAN target timeout(step count) -> reset")
+                        log_plan(f"-PLAN target timeout({max_steps_to_target} steps) -> reset")
                         target_map_x, target_map_y = None, None
                         target_set_step = None
+                        target_original_d = None
+                        best_fmm = None
+                        stuck_counter = 0
 
-                # Distance-to-target check
+                # Distance-to-target check (FMM geodesic, obstacle-aware)
+                # Only valid after at least one _get_action() call has populated fmm_dist
                 if target_map_x is not None and target_map_y is not None:
-                    dist = np.sqrt((target_map_x - agent_map_x) ** 2 +
-                                   (target_map_y - agent_map_y) ** 2)
-                    if dist < self.target_reached_threshold:
-                        log_plan(f"-PLAN target reached (dist={dist * self.resolution / 100:.2f}m) -> reset")
-                        target_map_x, target_map_y = None, None
-                        target_set_step = None
+                    fmm_remaining = self.policy.fmm_dist[agent_map_x, agent_map_y]
+                    if fmm_remaining > 0:  # guard: skip before first NAV call
+                        threshold = max(5, target_original_d * 0.15) if target_original_d else 5
+                        if fmm_remaining <= threshold:
+                            log_plan(f"-PLAN target reached (fmm_remaining={fmm_remaining:.0f}px({fmm_remaining*self.resolution/100:.1f}m) <= {threshold:.0f}px({threshold*self.resolution/100:.1f}m)) -> reset")
+                            target_map_x, target_map_y = None, None
+                            target_set_step = None
+                            target_original_d = None
+                            best_fmm = None
+                            stuck_counter = 0
+                        elif best_fmm is not None:
+                            step_px = 25.0 / self.resolution
+                            if fmm_remaining < best_fmm - step_px:
+                                best_fmm = fmm_remaining
+                                stuck_counter = 0
+                            else:
+                                stuck_counter += 1
+                                if stuck_counter >= max(8, max_steps_to_target // 3):
+                                    log_plan(f"-PLAN stuck (fmm={fmm_remaining:.0f} best={best_fmm:.0f}) -> reset")
+                                    target_map_x, target_map_y = None, None
+                                    target_set_step = None
+                                    target_original_d = None
+                                    best_fmm = None
+                                    stuck_counter = 0
 
                 if target_map_x is not None and target_map_y is not None:
                     pass
                 else:
                     # Collect 4-directional views
+                    self.current_bbox_image = "scanning"
                     four_views, obs, step = self._v3_collect_four_views(obs, step)
                     if four_views is None:
                         self._calculate_metric(infos)
@@ -2813,15 +2837,16 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                         self.bbox_history_images if self.bbox_history_images else None,
                     )
 
-                    log_plan(f"-PLAN: {plan} frame={frame_idx} bbox={bbox_px}")
-
                     if plan == "STOP":
+                        log_plan(f"-PLAN: {plan} {_DIRS.get(frame_idx, frame_idx)} bbox={bbox_px}")
                         frame = four_views[frame_idx]['rgb']
                         bbox = self._v3_bbox_dict(bbox_px)
                         ann = self.visualizer._save_rgb_with_bbox(
                             frame, bbox, label=f"stop_{_DIRS.get(frame_idx)}")
                         if ann is not None:
                             self.bbox_history_images.append(ann)
+                            self.current_bbox_image = ann
+                            self.current_bbox_plan = 'STOP'
                         action_list.append(HabitatSimActions.STOP)
 
                     elif plan == "APPROACH":
@@ -2831,11 +2856,22 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                             frame['rgb'], bbox, label=f"approach_{_DIRS.get(frame_idx)}")
                         if ann is not None:
                             self.bbox_history_images.append(ann)
+                            self.current_bbox_image = ann
+                            self.current_bbox_plan = 'APPROACH'
                         target_map_x, target_map_y = self._v3_bbox_to_target(
                             frame['depth'], frame['sensor_pose'], bbox_px,
                         )
+                        p = FMMPlanner(self.config, self.traversable)
+                        p.set_goal(np.array([target_map_y, target_map_x]))
+                        fmm_d = p.fmm_dist[agent_map_x, agent_map_y]
+                        step_px = 25.0 / self.resolution
+                        max_steps_to_target = max(10, min(int(fmm_d / step_px * 2), 80))
+                        target_original_d = fmm_d
+                        best_fmm = fmm_d
+                        stuck_counter = 0
                         target_set_step = step
                         last_decide_pose = four_views[0]['sensor_pose'].copy()
+                        log_plan(f"-PLAN: {plan} {_DIRS.get(frame_idx, frame_idx)} bbox={bbox_px} fmm_d={fmm_d:.0f}px({fmm_d*self.resolution/100:.1f}m) max_steps={max_steps_to_target}")
 
                     elif plan == "EXPLORE":
                         frame = four_views[frame_idx]
@@ -2844,17 +2880,36 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                             frame['rgb'], bbox, label=f"explore_{_DIRS.get(frame_idx)}")
                         if ann is not None:
                             self.bbox_history_images.append(ann)
+                            self.current_bbox_image = ann
+                            self.current_bbox_plan = 'EXPLORE'
                         target_map_x, target_map_y = self._v3_bbox_to_target(
                             frame['depth'], frame['sensor_pose'], bbox_px,
                         )
+                        p = FMMPlanner(self.config, self.traversable)
+                        p.set_goal(np.array([target_map_y, target_map_x]))
+                        fmm_d = p.fmm_dist[agent_map_x, agent_map_y]
+                        step_px = 25.0 / self.resolution
+                        max_steps_to_target = max(10, min(int(fmm_d / step_px * 2), 80))
+                        target_original_d = fmm_d
+                        best_fmm = fmm_d
+                        stuck_counter = 0
                         target_set_step = step
                         last_decide_pose = four_views[0]['sensor_pose'].copy()
+                        log_plan(f"-PLAN: {plan} {_DIRS.get(frame_idx, frame_idx)} bbox={bbox_px} fmm_d={fmm_d:.0f}px({fmm_d*self.resolution/100:.1f}m) max_steps={max_steps_to_target}")
 
                     elif plan == "OTHER":
-                        log_plan("-PLAN fail")
+                        log_plan("-PLAN: OTHER -> fail")
                         self._calculate_metric(infos)
                         return
 
+            # Render combined image AFTER DECIDE so bbox is up-to-date
+            self.visualizer._save_rgb_frame(
+                obs[0], step, getattr(self, 'visited_targets', None),
+                self.current_episode_id,
+                (target_map_x, target_map_y),
+                bbox_image=self.current_bbox_image,
+                bbox_plan=self.current_bbox_plan,
+            )
             # ==============================================================
             # FMM NAVIGATION
             # ==============================================================
@@ -2995,7 +3050,8 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             self.visualizer._save_depth(turn_obs[0]['depth'], step, use_colormap=False)
             self.visualizer._save_rgb_frame(
                 turn_obs[0], step, getattr(self, 'visited_targets', None),
-                self.current_episode_id, None,
+                self.current_episode_id, None, hollow_robot=True,
+                bbox_image=getattr(self, 'current_bbox_image', None),
             )
 
             # Capture at 90 deg intervals (turn 3=right, 6=back, 9=left).
