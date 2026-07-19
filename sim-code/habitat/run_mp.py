@@ -35,7 +35,7 @@ from habitat_baselines.common.baseline_registry import baseline_registry
 
 from vlnce_baselines.config.default import get_config
 from vlnce_baselines.utils.misc import seed_everything
-    
+
 def get_episode_ids_from_config(config):
     data_path = config.TASK_CONFIG.DATASET.DATA_PATH
     split = config.TASK_CONFIG.DATASET.SPLIT
@@ -134,7 +134,7 @@ def run_exp(exp_name: str, exp_config: str,
         config.USE_FMM = True
     elif 'USE_FMM' not in config:
         config.USE_FMM = False
-    
+
     # --no-fmm sets use_fmm=False; default is True. Always honor the CLI value.
     config.USE_FMM = use_fmm
 
@@ -142,7 +142,7 @@ def run_exp(exp_name: str, exp_config: str,
     config.ROLLOUT_V3 = rollout_v3
 
     config.freeze()
-    
+
     os.makedirs(config.RESULTS_DIR, exist_ok=True)
     os.makedirs(config.EVAL_CKPT_PATH_DIR, exist_ok=True)
     os.system("mkdir -p data/logs/running_log")
@@ -155,17 +155,17 @@ def run_exp(exp_name: str, exp_config: str,
     gpu_ids = config.TORCH_GPU_IDS
     num_devices = len(gpu_ids)
     logger.info(f'num devices: {num_devices}, gpu_ids: {gpu_ids}, num processes: {nprocesses}')
-    
+
     # Warn if oversubscribing GPUs (recommend at most 2 processes per GPU).
     if nprocesses > num_devices * 2:
         logger.info(f"Warning: {nprocesses} processes on {num_devices} GPUs may cause resource contention")
-    
+
     episode_info_list = get_episode_ids_from_config(config)
     total_available = len(episode_info_list)
     logger.info(f"total available episodes: {total_available}")
     import sys
     sys.stdout.flush()
-    
+
     if episode_file:
         with open(episode_file, 'r') as f:
             fixed_ids = set(json.load(f))
@@ -223,7 +223,7 @@ def run_exp(exp_name: str, exp_config: str,
             logger.info(f"RESUME: wrote remaining episode ids to {remaining_ids_path}")
         except Exception as e:
             logger.info(f"RESUME: failed to write remaining episode ids file: {e}")
-    
+
     if config.EVAL.EPISODE_COUNT > -1 and len(episode_info_list) > config.EVAL.EPISODE_COUNT:
         logger.info(f"Truncating episode list from {len(episode_info_list)} to {config.EVAL.EPISODE_COUNT} based on EVAL.EPISODE_COUNT")
         random.seed(time.time())
@@ -248,7 +248,7 @@ def run_exp(exp_name: str, exp_config: str,
     if not dynamic_queue:
         for i, ep_infos in enumerate(split_episode_infos):
             logger.info(f"Process {i}: {len(ep_infos)} episodes")
-    
+
     configs = []
     if dynamic_queue:
         # Build N worker configs with empty EPISODES_ALLOWED; per-ep filter is
@@ -358,13 +358,13 @@ def run_exp(exp_name: str, exp_config: str,
     logger.info("=" * 50)
     logger.info("AGGREGATED STATISTICS ACROSS ALL PROCESSES")
     logger.info("=" * 50)
-    
+
     # Load and merge episode stats
     from collections import defaultdict
     aggregated_metrics = defaultdict(list)
     total_episodes = 0
     evaluated_episode_ids = []
-    
+
     stats_files = glob.glob(os.path.join(config.EVAL_CKPT_PATH_DIR, "stats_ep_ckpt_*.json"))
     for stats_file in stats_files:
         try:
@@ -378,27 +378,27 @@ def run_exp(exp_name: str, exp_config: str,
                             aggregated_metrics[k].append(v)
         except Exception as e:
             logger.info(f"Error loading {stats_file}: {e}")
-    
+
     # Calculate averages
     final_averages = {}
     for k, v_list in aggregated_metrics.items():
         if v_list:
             final_averages[k] = sum(v_list) / len(v_list)
-    
+
     logger.info(f"Total Episodes Evaluated: {total_episodes}")
     logger.info(f"Evaluated Episode IDs: {sorted(evaluated_episode_ids)}")
     logger.info("Final Average Metrics:")
     pprint(final_averages)
-    
+
     # Merge model usage stats
     from vlnce_baselines.utils.stats import merge_model_usage_stats
     merge_model_usage_stats(config.EVAL_CKPT_PATH_DIR, config.TASK_CONFIG.DATASET.SPLIT)
-    
+
     # Merge navigation stats
     nav_stats_files = glob.glob(os.path.join(config.EVAL_CKPT_PATH_DIR, "nav_stats_*.json"))
     total_backtracks = 0
     total_waypoints = 0
-    
+
     for fpath in nav_stats_files:
         try:
             with open(fpath, 'r') as f:
@@ -407,7 +407,7 @@ def run_exp(exp_name: str, exp_config: str,
                 total_waypoints += data.get('total_waypoints', 0)
         except:
             pass
-    
+
     logger.info("=" * 50)
     logger.info("NAVIGATION STATISTICS")
     logger.info("=" * 50)
