@@ -59,16 +59,17 @@ class VLMReasoningAgentV3(VLMReasoningAgent):
         return rgb_image
 
     def _start_conversation(self, images, text):
-        """Begin a new conversation with multiple images and a text prompt.
+        """Begin a new conversation with a text prompt followed by images.
 
         Parameters
         ----------
         images : list of np.ndarray
             RGB images to include in the message.
         text : str
-            Prompt text (placed after the images).
+            Prompt text (placed before the images so the model has context
+            before processing each image).
         """
-        content = []
+        content = [{"type": "text", "text": text}]
         for img in images:
             pil_img = self._to_pil(img)
             content.append({
@@ -77,13 +78,12 @@ class VLMReasoningAgentV3(VLMReasoningAgent):
                     "url": f"data:image/png;base64,{self.img_to_base64(pil_img)}"
                 },
             })
-        content.append({"type": "text", "text": text})
         self._messages = [{"role": "user", "content": content}]
         self._req_last_count = 0  # reset incremental log tracker
 
     def _append_images_and_text(self, images, text):
-        """Append a user message with images and text to the conversation."""
-        content = []
+        """Append a user message with text followed by images."""
+        content = [{"type": "text", "text": text}]
         for img in images:
             pil_img = self._to_pil(img)
             content.append({
@@ -92,7 +92,6 @@ class VLMReasoningAgentV3(VLMReasoningAgent):
                     "url": f"data:image/png;base64,{self.img_to_base64(pil_img)}"
                 },
             })
-        content.append({"type": "text", "text": text})
         self._messages.append({"role": "user", "content": content})
 
     def _log_messages(self):
@@ -341,23 +340,31 @@ class VLMReasoningAgentV3(VLMReasoningAgent):
         """
         name = self._target_name(target)
 
-        # Build prompt text
-        hier_json = json.dumps(hierarchical_list)
-        text_parts = [
-            PROMPT_SELECT_ONE.format(target=name),
-            "",
-            PROMPT_SELECT_ONE_CANDIDATES_HEADER,
-            "```json",
-            hier_json,
-            "```",
-        ]
+        # Build content with text first, then interleaved labels + images
+        # so the model can unambiguously map each image to its
+        # (frame_idx, bbox_idx) entry in the hierarchical list.
+        content = [{"type": "text", "text": PROMPT_SELECT_ONE.format(target=name)}]
+        content.append({"type": "text", "text": PROMPT_SELECT_ONE_CANDIDATES_HEADER})
 
-        prompt_text = "\n".join(text_parts)
+        img_idx = 0
+        for item in hierarchical_list:
+            for reg in item.get('regions', []):
+                label = f"frame_idx={item['frame_idx']}, bbox_idx={reg['idx']}"
+                content.append({"type": "text", "text": label})
+                if img_idx < len(f_ann_list):
+                    pil_img = self._to_pil(f_ann_list[img_idx])
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{self.img_to_base64(pil_img)}"
+                        },
+                    })
+                img_idx += 1
 
-        # Build the message: start with candidate images
-        self._start_conversation(f_ann_list, prompt_text)
+        self._messages = [{"role": "user", "content": content}]
+        self._req_last_count = 0  # reset incremental log tracker
 
-        # If there are history images, append them
+        # If there are history images, append them as a second message
         if bbox_history_images:
             self._append_images_and_text(
                 bbox_history_images,

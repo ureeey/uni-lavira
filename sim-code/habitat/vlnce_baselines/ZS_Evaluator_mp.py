@@ -2544,7 +2544,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                                 if ann is not None:
                                     f_ann.append(ann)
 
-                        log_plan(f"-PLAN agent.explore candidates={len(f_ann)} history={len(self.bbox_history_images)}")
+                        log_plan(f"-PLAN agent.select_one candidates={len(f_ann)} history={len(self.bbox_history_images)}")
 
                         frame_idx, bbox_idx = self.agent_v3.select_one(
                             self.instruction,
@@ -2554,7 +2554,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                         )
 
                         if frame_idx is None or bbox_idx is None:
-                            log_plan("-PLAN agent.explore all explored -> fail")
+                            log_plan("-PLAN agent.select_one all explored -> fail")
                             self._v3_save_bbox_history(step)
                             self._calculate_metric(infos)
                             return
@@ -2571,7 +2571,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                                 self.bbox_history_images.append(ann_sel)
                                 self._bbox_history_labels.append(f"{_DIRS.get(frame_idx)}_selected")
                         if bbox_px is None:
-                            log_plan("-PLAN agent.explore bbox not found -> fail")
+                            log_plan("-PLAN agent.select_one bbox not found -> fail")
                             self._v3_save_bbox_history(step)
                             self._calculate_metric(infos)
                             return
@@ -2587,7 +2587,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                         # Only selected single-region images go to history;
                         # non-selected candidates are NOT previously explored.
 
-                        log_plan(f"-PLAN agent.explore frame={frame_idx} bbox={bbox_idx} target=({target_map_x},{target_map_y})")
+                        log_plan(f"-PLAN agent.select_one frame={frame_idx} bbox={bbox_idx} target=({target_map_x},{target_map_y})")
 
                     elif plan == "OTHER":
                         log_plan("-PLAN fail")
@@ -2741,8 +2741,9 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                 self.current_episode_id, None,
             )
 
-            # Capture at 90 deg intervals (turn 3=right, 6=back, 9=left)
-            if turn_idx % 3 == 0:
+            # Capture at 90 deg intervals (turn 3=right, 6=back, 9=left).
+            # Exclude turn 12 (360°), which would duplicate the front view.
+            if turn_idx % 3 == 0 and turn_idx < 12:
                 views.append({
                     'rgb': turn_obs[0]['rgb'].copy(),
                     'depth': turn_obs[0]['depth'].copy(),
