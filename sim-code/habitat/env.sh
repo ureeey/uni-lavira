@@ -18,28 +18,39 @@ export TRANSFORMERS_OFFLINE=1
 export __NV_PRIME_RENDER_OFFLOAD=1
 export __GLX_VENDOR_LIBRARY_NAME=nvidia
 
-# --- Logging verbosity ---
-# LAVIRA_LOG_PROMPT_OUT:  0=full (default), 1=skip prompt templates, 2=mute all prompt/output
-# LAVIRA_LOG_VERBOSE:  0=full (default), 1=quiet (no ChatCompletion dumps etc.)
-# LAVIRA_LOG_NETWORK:  0=off (default), 1=log proxy state & per-request network diagnostics
-# HABITAT_SIM_LOG:     silence C++ habitat-sim INFO logs (set to "warning" for quiet)
-# Uncomment to enable:
-export LAVIRA_LOG_PROMPT_OUT=2
-export LAVIRA_LOG_VERBOSE=1
-export GLOG_minloglevel=1
-export LAVIRA_LOG_NETWORK=0
-# Alternative if glog doesn't work: export HABITAT_SIM_LOG=warning
-
+# --- Logging ---
+# Master preset — sets sensible defaults for all categories below:
+#   LAVIRA_LOG=quiet    results only (compact progress bars, minimal output)
+#   LAVIRA_LOG=normal   prompts + decisions (suitable for daily eval)
+#   LAVIRA_LOG=debug    everything including network, body, FMM, full request history
+export LAVIRA_LOG=normal
+export LAVIRA_LOG_REQ=0
+export LAVIRA_LOG_RESP=0
+export LAVIRA_LOG_PLAN=1
+export LAVIRA_LOG_FMM=0
+export LAVIRA_LOG_ACT=0
 export LAVIRA_LOG_BODY=0
+export LAVIRA_LOG_NETWORK=0
+# Per-category overrides (take precedence over the preset):
+#
+# Evaluator layer (ZS_Evaluator_mp.py):
+#   LAVIRA_LOG_PLAN=1   branch decisions & NAV steps         [0/1]
+#   LAVIRA_LOG_FMM=1    FMM planner output                   [0/1]
+#   LAVIRA_LOG_ACT=1    action execution                     [0/1]
+#
+# Agent layer (agent.py / agent_v2.py / agent_v3.py):
+#   LAVIRA_LOG_REQ=1    API request content                  [0=off, 1=incremental, 2=full]
+#   LAVIRA_LOG_RESP=1   prompt & response content            [0/1]
+#
+# API layer (api_openai.py / api_dashscope.py):
+#   LAVIRA_LOG_BODY=1     HTTP body (image sizes, tokens)    [0/1]
+#   LAVIRA_LOG_NETWORK=1  HTTP metadata (latency, status)    [0/1]
+#
+# Examples of selective overrides:
+#   export LAVIRA_LOG=normal
+#   export LAVIRA_LOG_FMM=1       # also show FMM output in normal mode
+#   export LAVIRA_LOG_REQ=2       # full request history in normal mode
 
-# --- V2 rollout logging ---
-# Each category can be independently enabled (1) or disabled (0).
-# LAVIRA_V2_LOG_DECIDE:  [V2] branch decisions, DECIDE/NAV steps (default 1)
-# LAVIRA_V2_LOG_ACT:     [V2-ACT] action execution (default 1)
-# LAVIRA_V2_LOG_FMM:     [V2-FMM] FMM planner output (default 1)
-# LAVIRA_V2_LOG_REQ:     [V2-REQ] API request content (default 0)
-#   0 = off, 1 = incremental (only new messages), 2 = full (all messages)
-export LAVIRA_V2_LOG_DECIDE=1
-export LAVIRA_V2_LOG_ACT=0
-export LAVIRA_V2_LOG_FMM=0
-export LAVIRA_V2_LOG_REQ=0
+# Silence C++ habitat-sim INFO logs:
+export GLOG_minloglevel=1
+# Alternative if glog doesn't work: export HABITAT_SIM_LOG=warning

@@ -7,8 +7,15 @@ Both backends expose the same public interface, so upstream code (agent.py)
 needs no changes.
 """
 
-from .api_openai import LaViRA_OpenAI_API, log_prompt, log_response, log_verbose, log_network
+from .api_openai import LaViRA_OpenAI_API
 from .api_dashscope import LaViRA_DashScope_API
+from .logging import (  # noqa: F401  — re-export for backward compatibility
+    log_body,
+    log_network,
+    log_req as log_prompt,
+    log_resp as log_response,
+    log_plan as log_verbose,
+)
 
 
 class LaViRA_API:

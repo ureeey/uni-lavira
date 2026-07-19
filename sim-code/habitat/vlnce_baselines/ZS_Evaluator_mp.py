@@ -68,16 +68,19 @@ warnings.filterwarnings('ignore')
 
 from .agent import VLMReasoningAgent
 from .agent_v2 import VLMReasoningAgentV2
+from .agent_v3 import VLMReasoningAgentV3
 
-# V2 log switches (set via env.sh)
-_V2_LOG_DECIDE = int(_os.environ.get("LAVIRA_V2_LOG_DECIDE", "1"))
-_V2_LOG_ACT    = int(_os.environ.get("LAVIRA_V2_LOG_ACT", "1"))
-_V2_LOG_FMM    = int(_os.environ.get("LAVIRA_V2_LOG_FMM", "1"))
+# Logging — three-layer: evaluator/agent/api (see utils/logging.py)
+from .utils.logging import (  # noqa: F401
+    LOG_PLAN, LOG_FMM, LOG_ACT, LOG_PROGRESS_BAR,
+    log_plan, log_fmm, log_act,
+)
 
-def _v2log(flag, *args, **kwargs):
-    """Log a message if *flag* is truthy."""
-    if flag:
-        logger.info(*args, **kwargs)
+_ACTION_NAMES = {0: "STOP", 1: "MOVE_FWD", 2: "TURN_LEFT", 3: "TURN_RIGHT"}
+
+def _action_name(action_id):
+    """Return human-readable action name, e.g. 1 → 'MOVE_FWD'."""
+    return _ACTION_NAMES.get(action_id, str(action_id))
 
 
 @baseline_registry.register_trainer(name="ZS-Evaluator-mp")
@@ -172,6 +175,17 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             backtrack_second_chance=self.backtrack_second_chance,
         )
         self.agent_v2 = VLMReasoningAgentV2(
+            self.visualizer,
+            task_type=self.task_type,
+            use_guideline=False,
+            use_working_memory=False,
+            allow_move_behind=False,
+            debug_logging=debug_logging,
+            log_dir=debug_log_dir,
+            use_todo_list=False,
+            backtrack_second_chance=False,
+        )
+        self.agent_v3 = VLMReasoningAgentV3(
             self.visualizer,
             task_type=self.task_type,
             use_guideline=False,
@@ -904,6 +918,8 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
         """
         Execute a whole episode using bounding box target navigation
         """
+        if getattr(self.config, 'ROLLOUT_V3', False):
+            return self.rollout_v3()
         if getattr(self.config, 'ROLLOUT_V2', False):
             return self.rollout_v2()
 
@@ -979,7 +995,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             #    (consume the result of the previous step's action)
             # =================================================================
             if dones[0]:
-                if int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+                if LOG_PROGRESS_BAR:
                     sys.stdout.write("\n")
                     sys.stdout.flush()
                 self._calculate_metric(infos, submitted_answer=getattr(self, 'last_submitted_answer', None))
@@ -988,7 +1004,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             self.visualizer.destination = self.destination
             self.visualizer._action = self._action
 
-            if int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+            if LOG_PROGRESS_BAR:
                 # In-place progress line (overwrites itself, no scroll spam).
                 bar_width = 30
                 filled = int(bar_width * min(step / 500, 1.0))
@@ -1462,7 +1478,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                             if use_special_controller:
                                 traj_np = None  # Initialize to avoid undefined variable error
                                 if selected_controller == 'iplanner':
-                                    if not int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+                                    if LOG_ACT:
                                         logger.info(f"DEBUG: Step 2 - Using iPlanner (stair={self.agent.stair})")
                                     # Calculate local goal from target_map_x, target_map_y
                                     # Convert map indices to world meters
@@ -1681,7 +1697,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                                     self.detected_classes, search_destination
                                 )
                                 action_list.append(navigation_action)
-                                logger.info(f"[V1-FMM] step={step} action={navigation_action}")
+                                logger.info(f"[V1-FMM] step={step} action={_action_name(navigation_action)}")
                             elif not use_special_controller and not self.use_fmm:
                                 logger.warning("Step 2 - FMM is disabled and no other planner took over! This should not happen due to init validation.")
                             break
@@ -1751,7 +1767,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                                 global_traj.append([wx, wy, zb])
                             self.navdp_traj_global = np.array(global_traj)
                             self.last_iplanner_step = step
-                            if not int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+                            if LOG_ACT:
                                 logger.info(f"DEBUG: iPlanner generated trajectory with {len(global_traj)} points in Step 3")
                         else:
                             # Use stored global traj -> local
@@ -1961,7 +1977,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                         
                         action_list.append(action_id)
                     elif not use_special_controller and self.use_fmm:
-                        if not int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+                        if LOG_ACT:
                             logger.info(f"DEBUG: Step 3 - Using FMM. use_iplanner={self.use_iplanner}, use_navdp={self.use_navdp}, stair={self.agent.stair}")
                         # Clear special controller trajectories to avoid stale visualization
                         self.navdp_traj_global = None
@@ -2016,7 +2032,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                             self.detected_classes, search_destination
                         )
                         action_list.append(navigation_action)
-                        logger.info(f"[V1-FMM] step={step} action={navigation_action}")
+                        logger.info(f"[V1-FMM] step={step} action={_action_name(navigation_action)}")
                     else:
                         logger.warning("Step 3 - FMM is disabled and no other planner took over!")
                     # logger.info(f"Added navigation action: {navigation_action}")
@@ -2031,7 +2047,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                 action_list.pop(0)
                 actions = [{"action": self._action}]
 
-                logger.info(f"[V1-ACT] step={step} execute action={self._action}")
+                logger.info(f"[V1-ACT] step={step} execute action={_action_name(self._action)}")
 
                 outputs = self.envs.step(actions)
                 step += 1
@@ -2137,7 +2153,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             # ANALYZE STATE
             # ==============================================================
             if dones[0]:
-                if int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+                if LOG_PROGRESS_BAR:
                     sys.stdout.write("\n")
                     sys.stdout.flush()
                 self._calculate_metric(infos)
@@ -2150,7 +2166,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             self.visualizer.destination = self.destination
             self.visualizer._action = self._action
 
-            if int(os.environ.get("LAVIRA_LOG_VERBOSE", "0")):
+            if LOG_PROGRESS_BAR:
                 bar_width = 30
                 filled = int(bar_width * min(step / 500, 1.0))
                 bar = "█" * filled + "░" * (bar_width - filled)
@@ -2158,8 +2174,6 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                 sys.stdout.flush()
                 sys.stdout.write("\n")
                 sys.stdout.flush()
-            else:
-                _v2log(_V2_LOG_DECIDE, f"\n--PLAN episode:{self.current_episode_id}, step:{step}")
 
             self.visualizer._save_depth(obs[0]['depth'], step, use_colormap=False)
 
@@ -2191,7 +2205,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                 # --- Target timeout check (same as v1) ---
                 if target_map_x is not None and target_set_step is not None:
                     if step - target_set_step >= max_steps_to_target:
-                        _v2log(_V2_LOG_DECIDE, "--PLAN target timeout → reset")
+                        log_plan("-PLAN target timeout(step count) → reset")
                         target_map_x, target_map_y = None, None
                         target_set_step = None
                         nav_to_visible = False
@@ -2201,14 +2215,14 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                     dist = np.sqrt((target_map_x - agent_map_x) ** 2 +
                                    (target_map_y - agent_map_y) ** 2)
                     if dist < self.target_reached_threshold:
-                        _v2log(_V2_LOG_DECIDE, f"--PLAN target reached (dist={dist * self.resolution / 100:.2f}m) → reset")
+                        log_plan(f"-PLAN target reached (dist={dist * self.resolution / 100:.2f}m) → reset")
                         target_map_x, target_map_y = None, None
                         target_set_step = None
                         nav_to_visible = False
 
                 if target_map_x is not None and target_map_y is not None:
-                    # --- Navigation phase: keep FMM-ing toward stored target ---
-                    _v2log(_V2_LOG_DECIDE, f"--PLAN NAV step (target=({target_map_x},{target_map_y}), {step - target_set_step}s elapsed)")
+                    # --- Approach Closely phase: keep FMM-ing toward stored target ---
+                    log_plan(f"-PLAN fmm (target=({target_map_x},{target_map_y}), {step - target_set_step}s elapsed)")
                     waypoint = np.array([target_map_y, target_map_x])
                     navigation_action = self.policy._get_action(
                         current_pose, waypoint, full_map[0], self.traversable,
@@ -2216,20 +2230,20 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                         self.detected_classes, False,
                     )
                     action_list.append(navigation_action)
-                    _v2log(_V2_LOG_FMM, f"---FMM step={step} action={navigation_action}")
+                    log_fmm(f"---FMM step={step} action={_action_name(navigation_action)}")
                 else:
                     # --- VLM decision phase: no target, call agent stubs ---
-                    _v2log(_V2_LOG_DECIDE, "--PLAN DECIDE step")
+                    log_plan("-PLAN agent")
                     f = obs[0]['rgb'].copy()
                     instruction = self.instruction
 
                     if self.agent_v2.is_target_visible(instruction, f):
                         if self.agent_v2.is_target_near(instruction, f):
-                            _v2log(_V2_LOG_DECIDE, "--PLAN visible → NEAR → STOP")
+                            log_plan("-PLAN visible → NEAR → STOP")
                             action_list.append(HabitatSimActions.STOP)
                         else:
                             bbox = self.agent_v2.target_bbox(instruction, f)
-                            _v2log(_V2_LOG_DECIDE, f"--PLAN visible → FAR → bbox({bbox['x1']},{bbox['y1']},{bbox['x2']},{bbox['y2']}) → FMM")
+                            log_plan(f"-PLAN visible → FAR → bbox({bbox['x1']},{bbox['y1']},{bbox['x2']},{bbox['y2']}) → FMM")
                             self.visualizer._save_rgb_with_bbox(f, bbox)
                             target_map_x, target_map_y = self._v2_bbox_to_target(bbox, obs[0]['depth'], current_pose)
                             target_set_step = step
@@ -2242,17 +2256,17 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                                 self.detected_classes, False,
                             )
                             action_list.append(navigation_action)
-                            _v2log(_V2_LOG_FMM, f"---FMM step={step} action={navigation_action}")
+                            log_fmm(f"---FMM step={step} action={_action_name(navigation_action)}")
                     else:
                         if self.agent_v2.is_target_possible(instruction, f):
                             bbox = self.agent_v2.possible_bbox(instruction, f)
                             f_ann = self.visualizer._save_rgb_with_bbox(f, bbox)
 
                             if self.agent_v2.is_repeat(self.bbox_history_images, f_ann):
-                                _v2log(_V2_LOG_DECIDE, f"--PLAN possible → bbox({bbox['x1']},{bbox['y1']},{bbox['x2']},{bbox['y2']}) → REPEAT → TURN_RIGHT×3")
+                                log_plan(f"-PLAN possible → bbox({bbox['x1']},{bbox['y1']},{bbox['x2']},{bbox['y2']}) → REPEAT → TURN_RIGHT×3")
                                 action_list.extend([HabitatSimActions.TURN_RIGHT] * 3)
                             else:
-                                _v2log(_V2_LOG_DECIDE, f"--PLAN possible → bbox({bbox['x1']},{bbox['y1']},{bbox['x2']},{bbox['y2']}) → NEW → FMM")
+                                log_plan(f"-PLAN possible → bbox({bbox['x1']},{bbox['y1']},{bbox['x2']},{bbox['y2']}) → NEW → FMM")
                                 self.bbox_history_images.append(f_ann)
                                 target_map_x, target_map_y = self._v2_bbox_to_target(bbox, obs[0]['depth'], current_pose)
                                 target_set_step = step
@@ -2263,9 +2277,9 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                                     self.detected_classes, False,
                                 )
                                 action_list.append(navigation_action)
-                                _v2log(_V2_LOG_FMM, f"---FMM step={step} action={navigation_action}")
+                                log_fmm(f"---FMM step={step} action={_action_name(navigation_action)}")
                         else:
-                            _v2log(_V2_LOG_DECIDE, "--PLAN not visible/possible → TURN_RIGHT×3")
+                            log_plan("-PLAN not visible/possible → TURN_RIGHT×3")
                             action_list.extend([HabitatSimActions.TURN_RIGHT] * 3)
 
             # ==============================================================
@@ -2275,7 +2289,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                 self._action = action_list.pop(0)
                 actions = [{"action": self._action}]
 
-                _v2log(_V2_LOG_ACT, f"----ACT step={step} execute action={self._action}")
+                log_act(f"----ACT step={step} execute action={_action_name(self._action)} pos=({current_pose[0]:.3f},{current_pose[1]:.3f}) heading={current_pose[2]:.1f}deg")
 
                 outputs = self.envs.step(actions)
                 step += 1
@@ -2330,20 +2344,523 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                         and step - target_set_step > 1):
                     f = obs[0]['rgb'].copy()
                     if not self.agent_v2.is_target_visible(self.instruction, f):
-                        _v2log(_V2_LOG_ACT, "----ACT target lost visibility → abort nav")
+                        log_act("----ACT target lost visibility → abort nav")
                         self._save_debug_img(f, step, "target_lost")
                         action_list.clear()
                         target_map_x, target_map_y = None, None
                         target_set_step = None
                         nav_to_visible = False
                     elif self.agent_v2.is_target_near(self.instruction, f):
-                        _v2log(_V2_LOG_ACT, "----ACT target near → STOP")
+                        log_act("----ACT target near → STOP")
                         action_list.clear()
                         action_list.append(HabitatSimActions.STOP)
 
             action_step += 1
 
         self._calculate_metric(infos, is_timeout=True)
+
+    # ==================================================================
+    # rollout_v3 — single-call VLM judge with 4-directional views + FMM
+    # ==================================================================
+
+    def rollout_v3(self):
+        """V3 rollout: collect 4-directional views, single VLM judge call, FMM nav."""
+
+        # ------------------------------------------------------------------
+        # 1. INITIALIZATION
+        # ------------------------------------------------------------------
+        obs, full_pose = self._maps_initialization()
+
+        # Check allowed episodes (same as v1/v2)
+        if getattr(self, 'allowed_episodes', None) is not None:
+            current_ep = self.envs.current_episodes()[0]
+            is_allowed = False
+            for allowed_id, allowed_scene_id in self.allowed_episodes:
+                if str(current_ep.episode_id) == allowed_id:
+                    if current_ep.scene_id.endswith(allowed_scene_id) or \
+                       os.path.basename(current_ep.scene_id) == os.path.basename(allowed_scene_id):
+                        is_allowed = True
+                        break
+            if not is_allowed:
+                ep_info = f"{current_ep.episode_id} ({os.path.basename(current_ep.scene_id)})"
+                logger.info(f"Skipping episode {ep_info} (Not in assignment)")
+                return
+
+        dones = [False] * self.config.NUM_ENVIRONMENTS
+        infos = [{}] * self.config.NUM_ENVIRONMENTS
+
+        self._action = None
+        action_list = []
+        collided = 0
+        current_pose = full_pose[0] if full_pose is not None else None
+        prev_pose = None  # [x,y,heading] for collision detection
+        last_decide_pose = None  # pose at last DECIDE, for came_from_direction
+        self.bbox_history_images = []
+        self._bbox_history_labels = []
+
+        # Target tracking for persistent FMM nav
+        target_map_x, target_map_y = None, None
+        target_set_step = None
+        max_steps_to_target = 15
+
+        full_map = self.mapping_module.get_full_map()
+        step = 0
+        action_step = 0
+
+        while step < self.max_step:
+            # ==============================================================
+            # ANALYZE STATE
+            # ==============================================================
+            if dones[0]:
+                if LOG_PROGRESS_BAR:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                self._v3_save_bbox_history(step)
+                self._calculate_metric(infos)
+                return
+
+            pos = self.envs.call_at(0, '_env')._sim.get_agent_state().position
+            self.pos_list.append(pos)
+
+            self.visualizer.instruction = self.instruction
+            self.visualizer.destination = self.destination
+            self.visualizer._action = self._action
+
+            if LOG_PROGRESS_BAR:
+                bar_width = 30
+                filled = int(bar_width * min(step / 500, 1.0))
+                bar = "█" * filled + "░" * (bar_width - filled)
+                sys.stdout.write(f"\r  ep{self.current_episode_id}  [{bar}]  step {step}/500")
+                sys.stdout.flush()
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+
+            self.visualizer._save_depth(obs[0]['depth'], step, use_colormap=False)
+            self.visualizer._save_rgb_frame(
+                obs[0], step, getattr(self, 'visited_targets', None),
+                self.current_episode_id,
+                (target_map_x, target_map_y),
+            )
+
+            current_pose = full_pose[0]
+            self.current_step = step
+            self.visualizer.sync(step, self.current_episode_id)
+
+            position = current_pose[:2] * 100 / self.resolution
+            agent_map_x = int(position[1])
+            agent_map_y = int(position[0])
+
+            # ==============================================================
+            # DECIDE
+            # ==============================================================
+            if not action_list:
+                # --- Target timeout check (same as v1) ---
+                if target_map_x is not None and target_set_step is not None:
+                    if step - target_set_step >= max_steps_to_target:
+                        log_plan("-PLAN target timeout(step count) -> reset")
+                        target_map_x, target_map_y = None, None
+                        target_set_step = None
+
+                # --- Distance-to-target check (same as v1) ---
+                if target_map_x is not None and target_map_y is not None:
+                    dist = np.sqrt((target_map_x - agent_map_x) ** 2 +
+                                   (target_map_y - agent_map_y) ** 2)
+                    if dist < self.target_reached_threshold:
+                        log_plan(f"-PLAN target reached (dist={dist * self.resolution / 100:.2f}m) -> reset")
+                        target_map_x, target_map_y = None, None
+                        target_set_step = None
+
+                if target_map_x is not None and target_map_y is not None:
+                    # Keep FMM-ing toward existing target; action appended below
+                    pass
+                else:
+                    # --- Collect 4-directional views ---
+                    four_views, obs, step = self._v3_collect_four_views(obs, step)
+                    if four_views is None:
+                        # Episode ended during panorama
+                        self._v3_save_bbox_history(step)
+                        self._calculate_metric(infos)
+                        return
+
+                    # Sync visualizer step for correct bbox image naming
+                    self.visualizer.sync(step, self.current_episode_id)
+                    self.current_step = step
+
+                    # Compute which direction points toward previous DECIDE position
+                    came_from = self._v3_came_from_direction(last_decide_pose, four_views)
+                    _DIRS = {0: "front", 1: "right", 2: "back", 3: "left"}
+                    came_from_str = _DIRS.get(came_from, str(came_from)) if came_from is not None else "None"
+
+                    log_plan(f"-PLAN agent.judge (step={step}, came_from={came_from_str})")
+
+                    plan, hier_list = self.agent_v3.judge(
+                        self.instruction,
+                        [v['rgb'] for v in four_views],
+                        came_from,
+                    )
+
+                    log_plan(f"-PLAN: {plan}")
+
+                    if plan == "STOP":
+                        item = hier_list[0]
+                        reg = item['regions'][0]
+                        frame_idx = item['frame_idx']
+                        frame = four_views[frame_idx]['rgb']
+                        bbox = self._v3_bbox_dict(reg['bbox'])
+                        ann_stop = self.visualizer._save_rgb_with_bbox(
+                            frame, bbox, label=f"{_DIRS.get(frame_idx)}_stop")
+                        if ann_stop is not None:
+                            self.bbox_history_images.append(ann_stop)
+                            self._bbox_history_labels.append(f"{_DIRS.get(frame_idx)}_stop")
+                        action_list.append(HabitatSimActions.STOP)
+
+                    elif plan == "APPROACH":
+                        item = hier_list[0]
+                        reg = item['regions'][0]
+                        frame_idx = item['frame_idx']
+                        frame = four_views[frame_idx]
+                        bbox = self._v3_bbox_dict(reg['bbox'])
+                        ann_appr = self.visualizer._save_rgb_with_bbox(
+                            frame['rgb'], bbox, label=f"{_DIRS.get(frame_idx)}_appr")
+                        if ann_appr is not None:
+                            self.bbox_history_images.append(ann_appr)
+                            self._bbox_history_labels.append(f"{_DIRS.get(frame_idx)}_appr")
+                        target_map_x, target_map_y = self._v3_bbox_to_target(
+                            frame['depth'], frame['sensor_pose'], reg['bbox'],
+                        )
+                        target_set_step = step
+                        last_decide_pose = four_views[0]['sensor_pose'].copy()
+
+                    elif plan == "EXPLORE":
+                        f_ann = []
+                        for item in hier_list:
+                            frame_idx = item['frame_idx']
+                            frame = four_views[frame_idx]['rgb']
+                            for reg in item['regions']:
+                                bbox = self._v3_bbox_dict(reg['bbox'])
+                                label = f"{_DIRS.get(frame_idx)}_candidate"
+                                ann = self.visualizer._save_rgb_with_bbox(
+                                    frame, bbox, label=label)
+                                if ann is not None:
+                                    f_ann.append(ann)
+
+                        log_plan(f"-PLAN agent.explore candidates={len(f_ann)} history={len(self.bbox_history_images)}")
+
+                        frame_idx, bbox_idx = self.agent_v3.select_one(
+                            self.instruction,
+                            self.bbox_history_images,
+                            f_ann,
+                            hier_list,
+                        )
+
+                        if frame_idx is None or bbox_idx is None:
+                            log_plan("-PLAN agent.explore all explored -> fail")
+                            self._v3_save_bbox_history(step)
+                            self._calculate_metric(infos)
+                            return
+
+                        # Find the bbox from hier_list
+                        bbox_px = self._v3_find_bbox(hier_list, frame_idx, bbox_idx)
+                        if bbox_px is not None:
+                            # Save the selected one with _selected label, add to history
+                            frame = four_views[frame_idx]['rgb']
+                            bbox = self._v3_bbox_dict(bbox_px)
+                            ann_sel = self.visualizer._save_rgb_with_bbox(
+                                frame, bbox, label=f"{_DIRS.get(frame_idx)}_selected")
+                            if ann_sel is not None:
+                                self.bbox_history_images.append(ann_sel)
+                                self._bbox_history_labels.append(f"{_DIRS.get(frame_idx)}_selected")
+                        if bbox_px is None:
+                            log_plan("-PLAN agent.explore bbox not found -> fail")
+                            self._v3_save_bbox_history(step)
+                            self._calculate_metric(infos)
+                            return
+
+                        target_map_x, target_map_y = self._v3_bbox_to_target(
+                            four_views[frame_idx]['depth'],
+                            four_views[frame_idx]['sensor_pose'],
+                            bbox_px,
+                        )
+                        target_set_step = step
+                        last_decide_pose = four_views[0]['sensor_pose'].copy()
+
+                        # Only selected single-region images go to history;
+                        # non-selected candidates are NOT previously explored.
+
+                        log_plan(f"-PLAN agent.explore frame={frame_idx} bbox={bbox_idx} target=({target_map_x},{target_map_y})")
+
+                    elif plan == "OTHER":
+                        log_plan("-PLAN fail")
+                        self._v3_save_bbox_history(step)
+                        self._calculate_metric(infos)
+                        return
+
+            # ==============================================================
+            # FMM NAVIGATION (when target is set)
+            # ==============================================================
+            if target_map_x is not None and target_map_y is not None:
+                waypoint = np.array([target_map_y, target_map_x])
+                navigation_action = self.policy._get_action(
+                    current_pose, waypoint, full_map[0], self.traversable,
+                    self.collision_map, step, self.current_episode_id,
+                    self.detected_classes, False,
+                )
+                action_list.append(navigation_action)
+                log_fmm(f"---FMM step={step} action={_action_name(navigation_action)}")
+
+            # ==============================================================
+            # ACT — execute action
+            # ==============================================================
+            if action_list:
+                self._action = action_list.pop(0)
+                actions = [{"action": self._action}]
+
+                log_act(f"----ACT step={step} execute action={_action_name(self._action)} pos=({current_pose[0]:.3f},{current_pose[1]:.3f}) heading={current_pose[2]:.1f}deg")
+
+                outputs = self.envs.step(actions)
+                step += 1
+
+                obs, _, dones, infos = [list(x) for x in zip(*outputs)]
+
+                if not dones[0]:
+                    batch_obs = self._batch_obs(obs)
+                    poses = torch.from_numpy(np.array([item['sensor_pose'] for item in obs])).float().to(self.device)
+                    self.mapping_module(batch_obs, poses, self.current_step)
+                    full_map, full_pose, one_step_full_map = \
+                        self.mapping_module.update_map(step, self.detected_classes, self.current_episode_id)
+                    self.mapping_module.one_step_full_map.fill_(0.)
+                    self.mapping_module.one_step_local_map.fill_(0.)
+
+                    self.traversable, self.floor, self.frontiers = self._process_map(step, full_map[0])
+                    self.one_step_floor = self._process_one_step_floor(one_step_full_map[0])
+
+                    # Track [x,y,heading] pose for collision detection
+                    prev_pose = current_pose
+                    current_pose = full_pose[0]
+
+                    # Collision detection
+                    if prev_pose is not None and current_pose is not None:
+                        displacement = calculate_displacement(prev_pose, current_pose, self.resolution)
+                        if displacement < 0.2 * 100 / self.resolution:
+                            collided += 1
+                        else:
+                            collided = 0
+                        if collided >= 30:
+                            fname = os.path.join(self.config.EVAL_CKPT_PATH_DIR,
+                                                 f"r{self.local_rank}_w{self.world_size}_collision_stuck.txt")
+                            with open(fname, "a") as f:
+                                f.writelines(
+                                    f"id: {str(self.current_episode_id)}; step: {str(step)}; collided: {str(collided)}\n")
+
+                    current_action = self._action
+                    if prev_pose is not None and current_action is not None and current_action == 1:
+                        collision_map = collision_check_fmm(prev_pose, current_pose, self.resolution,
+                                                            self.mapping_module.map_shape)
+                        self.collision_map = np.logical_or(self.collision_map, collision_map)
+                    self.traversable[self.collision_map == 1] = 0
+                else:
+                    self._v3_save_bbox_history(step)
+                    self._calculate_metric(infos)
+                    return
+
+            action_step += 1
+
+        self._v3_save_bbox_history(step)
+        self._calculate_metric(infos, is_timeout=True)
+
+    # ------------------------------------------------------------------
+    # V3 helper methods
+    # ------------------------------------------------------------------
+
+    def _v3_save_bbox_history(self, step):
+        """Save all bbox-annotated history images at episode end."""
+        if not self.bbox_history_images:
+            return
+        ep_dir = os.path.join(self.save_dir, str(self.current_episode_id))
+        os.makedirs(ep_dir, exist_ok=True)
+        for i, img in enumerate(self.bbox_history_images):
+            if img is None:
+                continue
+            label = self._bbox_history_labels[i] if i < len(self._bbox_history_labels) else 'hist'
+            fname = os.path.join(ep_dir, f"history_{label}_step{step:04d}.png")
+            cv2.imwrite(fname, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+
+    def _v3_collect_four_views(self, obs, step):
+        """Collect 4-directional RGB+D frames by turning right in 90 deg increments.
+
+        Captures the current frame as *front* (0 deg), then turns right in
+        90 deg increments for *right* / *back* / *left*, and finally returns to
+        the original heading.  Total: 12 TURN_RIGHT steps.
+
+        The mapping module is updated at every turn step (same as v1's
+        ``get_panorama``) so the map stays current.
+
+        Returns ``(four_views, obs, step)`` or ``(None, obs, step)`` if the
+        episode ends during the spin.
+        """
+        views = []
+
+        # Frame 0: Front (current heading, no turn needed)
+        # Use mapping module's full_pose, NOT obs['sensor_pose'] (different coordinate system)
+        front_pose = self.mapping_module.full_pose[0].cpu().numpy().copy()
+        views.append({
+            'rgb': obs[0]['rgb'].copy(),
+            'depth': obs[0]['depth'].copy(),
+            'sensor_pose': front_pose,
+            'angle': 0,
+            'step': step,
+        })
+
+        turn_obs = obs
+        for turn_idx in range(1, 12 + 1):
+            turn_action = [{"action": HabitatSimActions.TURN_RIGHT}]
+            turn_outputs = self.envs.step(turn_action)
+            turn_obs, _, turn_dones, turn_infos = [list(x) for x in zip(*turn_outputs)]
+            step += 1
+
+            if turn_dones[0]:
+                return None, turn_obs, step
+
+            # Update map state (same as v1's get_panorama)
+            batch_obs = self._batch_obs(turn_obs)
+            poses = torch.from_numpy(
+                np.array([item['sensor_pose'] for item in turn_obs])
+            ).float().to(self.device)
+            self.mapping_module(batch_obs, poses, self.current_step)
+            _, full_pose_turn, _ = self.mapping_module.update_map(
+                step, self.detected_classes, self.current_episode_id,
+            )
+            self.mapping_module.one_step_full_map.fill_(0.)
+            self.mapping_module.one_step_local_map.fill_(0.)
+
+            # Save frame during panorama (same as regular loop iterations)
+            self.visualizer.sync(step, self.current_episode_id)
+            self.visualizer._save_depth(turn_obs[0]['depth'], step, use_colormap=False)
+            self.visualizer._save_rgb_frame(
+                turn_obs[0], step, getattr(self, 'visited_targets', None),
+                self.current_episode_id, None,
+            )
+
+            # Capture at 90 deg intervals (turn 3=right, 6=back, 9=left)
+            if turn_idx % 3 == 0:
+                views.append({
+                    'rgb': turn_obs[0]['rgb'].copy(),
+                    'depth': turn_obs[0]['depth'].copy(),
+                    'sensor_pose': full_pose_turn[0].copy(),
+                    'angle': turn_idx * 30 % 360,
+                    'step': step,
+                })
+
+        obs = turn_obs
+        return views, obs, step
+
+    def _v3_came_from_direction(self, prev_pose, four_views):
+        """Return which frame (0=front,1=right,2=back,3=left) points toward *prev_pose*.
+
+        Both *prev_pose* and the sensor poses in *four_views* are ``[x, z, heading_deg]``.
+
+        Returns ``None`` if *prev_pose* is ``None`` or the displacement is
+        negligible.
+        """
+        if prev_pose is None:
+            return None
+
+        cur_pose = np.array(four_views[0]['sensor_pose'])
+        cur_x, cur_z, cur_heading_deg = cur_pose
+        prev_pose = np.array(prev_pose)
+        prev_x, prev_z, _ = prev_pose
+
+        # 1. World-frame: two positions
+        # 2. World-frame: robot forward unit vector
+        # heading=0 → +X (east), CCW positive (verified via MOVE_FWD displacement)
+        heading_rad = np.deg2rad(cur_heading_deg)
+        fwd_x = np.cos(heading_rad)
+        fwd_z = np.sin(heading_rad)
+        # Right vector: 90° clockwise from forward (heading - 90°)
+        right_x = np.cos(heading_rad - np.pi / 2)
+        right_z = np.sin(heading_rad - np.pi / 2)
+
+        # 3. World-frame: unit vector from current to previous
+        dx = prev_x - cur_x
+        dz = prev_z - cur_z
+        dist = np.sqrt(dx * dx + dz * dz)
+
+        if dist < 0.001:
+            return None
+
+        disp_ux = dx / dist
+        disp_uz = dz / dist
+
+        # 4. Decompose displacement into robot frame (forward, right)
+        fwd_comp = fwd_x * disp_ux + fwd_z * disp_uz
+        right_comp = right_x * disp_ux + right_z * disp_uz
+        angle_deg = np.rad2deg(np.arctan2(right_comp, fwd_comp))
+
+        # Classify: [-45°,45°]=front, [45°,135°]=right, [-135°,-45°]=left, rest=back
+        if -45 <= angle_deg <= 45:
+            result = 0  # front
+        elif 45 < angle_deg <= 135:
+            result = 1  # right
+        elif -135 <= angle_deg < -45:
+            result = 3  # left
+        else:
+            result = 2  # back
+
+        return result
+
+    @staticmethod
+    def _v3_bbox_dict(bbox_px):
+        """Convert ``[x1, y1, x2, y2]`` pixel coords to the bbox dict expected
+        by ``_save_rgb_with_bbox``.
+        """
+        x1, y1, x2, y2 = bbox_px
+        return {
+            'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
+            'x': x1, 'y': y1,
+            'width': x2 - x1, 'height': y2 - y1,
+            'target': 'target',
+        }
+
+    def _v3_bbox_to_target(self, depth_obs, sensor_pose, bbox_px):
+        """Convert pixel bbox to map-coordinate target using a specific frame's
+        depth image and sensor pose.
+
+        *sensor_pose* is ``[x, z, heading_deg]`` from the mapping module.
+        """
+        pose_2d = np.array(sensor_pose)
+
+        depth_m = self._preprocess_depth(depth_obs, 0.1, 5.0) / 100.0
+        x1, y1, x2, y2 = bbox_px
+        bbox_dict = {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2}
+
+        for _ in range(10):  # max 10 retries (~1m depth reduction)
+            target = get_world_xz_from_pixel(
+                bbox=bbox_dict,
+                depth_image=depth_m,
+                full_pose=pose_2d,
+                camera_intrinsics=self._get_camera_intrinsics(),
+            )
+            tx = int(target[0] * 100.0 / self.resolution)
+            ty = int(target[1] * 100.0 / self.resolution)
+            tx = max(0, min(tx, self.map_shape[0] - 1))
+            ty = max(0, min(ty, self.map_shape[1] - 1))
+            if self.traversable[ty, tx] == 1 or depth_m.max() < 0.1:
+                return tx, ty
+            depth_m = depth_m - 0.1
+        # Fallback: use the last computed target
+        return tx, ty
+
+    @staticmethod
+    def _v3_find_bbox(hier_list, frame_idx, bbox_idx):
+        """Find the bbox pixel coords for ``(frame_idx, bbox_idx)`` in the
+        hierarchical list returned by ``judge()``.
+        """
+        for item in hier_list:
+            if item['frame_idx'] == frame_idx:
+                for reg in item['regions']:
+                    if reg['idx'] == bbox_idx:
+                        return reg['bbox']
+        return None
 
     def _save_debug_img(self, rgb, step, label):
         """Save a debug snapshot (e.g. 'target_lost') to the episode directory."""
@@ -2419,9 +2936,11 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
 
         self.envs.close()
 
-        # Print final statistics (merge v1 + v2 if rollout_v2 is active)
+        # Print final statistics (merge v1 + v2 + v3)
         logger.info("=== FINAL MODEL USAGE STATISTICS ===")
-        if getattr(self.config, 'ROLLOUT_V2', False):
+        if getattr(self.config, 'ROLLOUT_V3', False):
+            final_stats = self.agent_v3.model.print_usage_stats()
+        elif getattr(self.config, 'ROLLOUT_V2', False):
             final_stats = self.agent_v2.model.print_usage_stats()
         else:
             final_stats = self.agent.model.print_usage_stats()
@@ -2530,7 +3049,9 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             except Exception:
                 pass
 
-        if getattr(self.config, 'ROLLOUT_V2', False):
+        if getattr(self.config, 'ROLLOUT_V3', False):
+            final_stats = self.agent_v3.model.print_usage_stats()
+        elif getattr(self.config, 'ROLLOUT_V2', False):
             final_stats = self.agent_v2.model.print_usage_stats()
         else:
             final_stats = self.agent.model.print_usage_stats()
