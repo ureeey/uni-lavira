@@ -13,7 +13,8 @@ from PIL import Image
 from .agent import VLMReasoningAgent
 from .utils.api import log_response
 from .prompts.prompts_objnav_v4 import (
-    PROMPT_V4,
+    PROMPT_V4_PRE,
+    PROMPT_V4_POST,
     PROMPT_V4_HISTORY_HEADER,
 )
 
@@ -74,7 +75,7 @@ class VLMReasoningAgentV4(VLMReasoningAgent):
                 logger.info(f"--REQ [{i}] {role}: {content}")
                 total_kb += len(content) / 1024
             elif isinstance(content, list):
-                imgs_kb = 0
+                img_idx = 0
                 for item in content:
                     if item.get("type") == "text":
                         t = item["text"]
@@ -83,10 +84,9 @@ class VLMReasoningAgentV4(VLMReasoningAgent):
                     elif item.get("type") == "image_url":
                         url = item["image_url"]["url"]
                         size_kb = len(url) / 1024
-                        imgs_kb += size_kb
-                total_kb += imgs_kb
-                if imgs_kb > 0:
-                    logger.info(f"--REQ [{i}] {role} image: {imgs_kb:.0f} KB")
+                        img_idx += 1
+                        logger.info(f"--REQ [{i}] {role} img #{img_idx}: {size_kb:.0f} KB")
+                        total_kb += size_kb
         self._req_last_count = len(self._messages)
         if total_kb > 0:
             logger.info(f"--REQ --- {total_kb:.0f} KB ---")
@@ -135,16 +135,16 @@ class VLMReasoningAgentV4(VLMReasoningAgent):
         direction_names = {0: "front", 1: "right", 2: "back", 3: "left"}
         if came_from_direction is not None:
             dir_name = direction_names.get(came_from_direction, "unknown")
-            came_from_fact = f"Came from: {dir_name}.\n"
+            came_from_fact = f"You came from {dir_name} and exploration in this direction has the lowest priority.\n"
         else:
             came_from_fact = ""
 
-        prompt = PROMPT_V4.format(target=name, came_from_fact=came_from_fact)
+        prompt_post = PROMPT_V4_POST.format(target=name, came_from_fact=came_from_fact)
 
-        # Build messages: system + user(4 images) + optional history
+        # Build messages: system + user(text PRE + 4 imgs + text POST) + optional history
         self._messages = [{"role": "system", "content": "Output only the result. No analysis."}]
 
-        content = [{"type": "text", "text": prompt}]
+        content = [{"type": "text", "text": PROMPT_V4_PRE}]
         for img in four_rgb_images:
             pil_img = self._to_pil(img)
             content.append({
@@ -153,21 +153,20 @@ class VLMReasoningAgentV4(VLMReasoningAgent):
                     "url": f"data:image/png;base64,{self.img_to_base64(pil_img)}"
                 },
             })
-        self._messages.append({"role": "user", "content": content})
-        self._req_last_count = 0
-
-        # Append history images as second message if available
+        # Append history images if available (before POST text)
         if bbox_history_images:
-            hist_content = [{"type": "text", "text": PROMPT_V4_HISTORY_HEADER}]
+            content.append({"type": "text", "text": PROMPT_V4_HISTORY_HEADER})
             for img in bbox_history_images:
                 pil_img = self._to_pil(img)
-                hist_content.append({
+                content.append({
                     "type": "image_url",
                     "image_url": {
                         "url": f"data:image/png;base64,{self.img_to_base64(pil_img)}"
                     },
                 })
-            self._messages.append({"role": "user", "content": hist_content})
+        content.append({"type": "text", "text": prompt_post})
+        self._messages.append({"role": "user", "content": content})
+        self._req_last_count = 0
 
         # Call model with retry on parse failure
         for _attempt in range(5):
@@ -211,13 +210,18 @@ class VLMReasoningAgentV4(VLMReasoningAgent):
 
         last_line = lines[-1]
 
-        # Try D (single letter, no coordinates)
+        # Try D (single letter)
         if last_line == "D":
             return "OTHER", None, None
 
-        # Try <letter>,<dir>,<x1>,<y1>,<x2>,<y2>
+        # Try D,<idx> (duplicate of prior explored image idx, 1-based)
+        m = re.match(r"^D,(\d+)$", last_line)
+        if m:
+            return "OTHER", None, None
+
+        # Try <A|B|C>,<dir>,<x1>,<y1>,<x2>,<y2>
         m = re.match(
-            r"^([A-D]),(front|right|back|left),(\d{1,4}),(\d{1,4}),(\d{1,4}),(\d{1,4})$",
+            r"^([A-C]),(front|right|back|left),(\d{1,4}),(\d{1,4}),(\d{1,4}),(\d{1,4})$",
             last_line,
         )
         if not m:
@@ -229,10 +233,6 @@ class VLMReasoningAgentV4(VLMReasoningAgent):
         y1 = int(m.group(4))
         x2 = int(m.group(5))
         y2 = int(m.group(6))
-
-        # Validate
-        if letter == "D":
-            raise RuntimeError(f"V4 parse error: D must not have coordinates: {output!r}")
         if not (0 <= x1 <= 1000 and 0 <= y1 <= 1000 and 0 <= x2 <= 1000 and 0 <= y2 <= 1000):
             raise RuntimeError(f"V4 parse error: coordinates out of 0-1000 range: {output!r}")
 

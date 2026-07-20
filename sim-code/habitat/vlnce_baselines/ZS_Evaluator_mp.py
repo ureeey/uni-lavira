@@ -2730,6 +2730,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
         max_steps_to_target = 15  # will be set dynamically per target
         best_fmm = None  # best FMM distance achieved in current NAV cycle
         stuck_counter = 0
+        target_is_approach = False
 
         full_map = self.mapping_module.get_full_map()
         step = 0
@@ -2777,6 +2778,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                 if target_map_x is not None and target_set_step is not None:
                     if step - target_set_step >= max_steps_to_target:
                         log_plan(f"-PLAN target timeout({max_steps_to_target} steps) -> reset")
+                        target_is_approach = False
                         target_map_x, target_map_y = None, None
                         target_set_step = None
                         target_original_d = None
@@ -2788,15 +2790,31 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                 if target_map_x is not None and target_map_y is not None:
                     fmm_remaining = self.policy.fmm_dist[agent_map_x, agent_map_y]
                     if fmm_remaining > 0:  # guard: skip before first NAV call
-                        threshold = max(3, target_original_d * 0.10) if target_original_d else 3
-                        if fmm_remaining <= threshold:
-                            log_plan(f"-PLAN target reached (fmm_remaining={fmm_remaining:.0f}px({fmm_remaining*self.resolution/100:.1f}m) <= {threshold:.0f}px({threshold*self.resolution/100:.1f}m)) -> reset")
-                            target_map_x, target_map_y = None, None
-                            target_set_step = None
-                            target_original_d = None
-                            best_fmm = None
-                            stuck_counter = 0
-                        elif best_fmm is not None:
+                        if target_is_approach:
+                            # APPROACH: max(Euclidean, FMM) < 0.6m
+                            eucl_px = np.sqrt((target_map_x - agent_map_y)**2 + (target_map_y - agent_map_x)**2)
+                            eucl_m = eucl_px * self.resolution / 100.0
+                            fmm_m = fmm_remaining * self.resolution / 100.0
+                            check_m = max(eucl_m, fmm_m)
+                            if check_m < 0.8:
+                                log_plan(f"-PLAN target reached APPROACH (eucl={eucl_m:.1f}m fmm={fmm_m:.1f}m max={check_m:.1f}m < 0.8m) -> reset")
+                                target_map_x, target_map_y = None, None
+                                target_set_step = None
+                                target_original_d = None
+                                best_fmm = None
+                                stuck_counter = 0
+                                target_is_approach = False
+                        else:
+                            threshold = max(3, target_original_d * 0.10) if target_original_d else 3
+                            if fmm_remaining <= threshold:
+                                log_plan(f"-PLAN target reached (fmm_remaining={fmm_remaining:.0f}px({fmm_remaining*self.resolution/100:.1f}m) <= {threshold:.0f}px({threshold*self.resolution/100:.1f}m)) -> reset")
+                                target_map_x, target_map_y = None, None
+                                target_set_step = None
+                                target_original_d = None
+                                best_fmm = None
+                                stuck_counter = 0
+                                target_is_approach = False
+                        if best_fmm is not None:
                             step_px = 25.0 / self.resolution
                             if fmm_remaining < best_fmm - step_px:
                                 best_fmm = fmm_remaining
@@ -2805,6 +2823,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                                 stuck_counter += 1
                                 if stuck_counter >= max(12, max_steps_to_target // 3):
                                     log_plan(f"-PLAN stuck (fmm={fmm_remaining:.0f} best={best_fmm:.0f}) -> reset")
+                                    target_is_approach = False
                                     target_map_x, target_map_y = None, None
                                     target_set_step = None
                                     target_original_d = None
@@ -2865,35 +2884,26 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                         target_map_x, target_map_y = self._v3_bbox_to_target(
                             frame['depth'], frame['sensor_pose'], bbox_px,
                         )
-                        # Pullback: gap = dist_m - fmm_raw, fill to 0.6m
-                        dx = target_map_x - agent_map_y
-                        dy = target_map_y - agent_map_x
-                        dist_px = np.sqrt(dx * dx + dy * dy)
-                        dist_m = dist_px * self.resolution / 100.0
                         p = FMMPlanner(self.config, self.traversable)
                         p.set_goal(np.array([target_map_y, target_map_x]))
-                        fmm_raw = p.fmm_dist[agent_map_x, agent_map_y]
-                        fmm_raw_m = fmm_raw * self.resolution / 100.0
-                        gap = max(0, dist_m - fmm_raw_m)
-                        pullback_m = max(0, 0.6 - gap)
-                        if dist_px > 0 and pullback_m > 0:
-                            pullback_px = pullback_m * 100.0 / self.resolution
-                            scale = pullback_px / dist_px
-                            target_map_x = int(target_map_x - dx * scale)
-                            target_map_y = int(target_map_y - dy * scale)
-                            p = FMMPlanner(self.config, self.traversable)
-                            p.set_goal(np.array([target_map_y, target_map_x]))
-                            fmm_d = p.fmm_dist[agent_map_x, agent_map_y]
-                        else:
-                            fmm_d = fmm_raw
+                        fmm_d = p.fmm_dist[agent_map_x, agent_map_y]
+                        # Check if already close enough → treat as STOP
+                        eucl_px = np.sqrt((target_map_x - agent_map_y)**2 + (target_map_y - agent_map_x)**2)
+                        eucl_m = eucl_px * self.resolution / 100.0
+                        fmm_m = fmm_d * self.resolution / 100.0
+                        if max(eucl_m, fmm_m) < 0.8:
+                            log_plan(f"-PLAN: APPROACH→STOP (eucl={eucl_m:.1f}m fmm={fmm_m:.1f}m < 0.8m)")
+                            action_list.append(HabitatSimActions.STOP)
+                            continue
                         step_px = 25.0 / self.resolution
                         max_steps_to_target = max(10, min(int(fmm_d / step_px * 3), 80))
                         target_original_d = fmm_d
                         best_fmm = fmm_d
                         stuck_counter = 0
                         target_set_step = step
+                        target_is_approach = True
                         last_decide_pose = four_views[0]['sensor_pose'].copy()
-                        log_plan(f"-PLAN: {plan} {_DIRS.get(frame_idx, frame_idx)} bbox={bbox_px} dist={dist_m:.1f}m fmm_raw={fmm_raw_m:.1f}m gap={gap:.1f}m pullback={pullback_m:.1f}m fmm_d={fmm_d:.0f}px({fmm_d*self.resolution/100:.1f}m) max_steps={max_steps_to_target}")
+                        log_plan(f"-PLAN: {plan} {_DIRS.get(frame_idx, frame_idx)} bbox={bbox_px} fmm_d={fmm_d:.0f}px({fmm_d*self.resolution/100:.1f}m) max_steps={max_steps_to_target}")
 
                     elif plan == "EXPLORE":
                         frame = four_views[frame_idx]
@@ -2916,6 +2926,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                         best_fmm = fmm_d
                         stuck_counter = 0
                         target_set_step = step
+                        target_is_approach = False
                         last_decide_pose = four_views[0]['sensor_pose'].copy()
                         log_plan(f"-PLAN: {plan} {_DIRS.get(frame_idx, frame_idx)} bbox={bbox_px} fmm_d={fmm_d:.0f}px({fmm_d*self.resolution/100:.1f}m) max_steps={max_steps_to_target}")
 
